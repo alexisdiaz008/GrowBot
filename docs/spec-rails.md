@@ -4,7 +4,7 @@ Convention over configuration for GrowBot firmware. No new wire format. Walk sta
 
 ## Resources
 
-A **channel** is `id → degrees` (0–180, 90 = neutral). Shared `body_config` lists ids, limits, bands, verbs — **no pins**. Pins/ports live in firmware next to `GPIO_PINS` / `PORT_GP`.
+A **channel** is `id → degrees` (0–180, 90 = neutral). Shared `body_config` lists ids, limits, bands, verbs — **no pins**. Pins/ports live in firmware as `CHANNEL_PORT` / `PORT_TO_GPIO` ([`firmware/channels.py`](../firmware/channels.py) and [`firmware/PicoRobotics.py`](../firmware/PicoRobotics.py)). Engines speak channel ids (`leg_l`, `leg_r`, `arm_l`, `arm_r`). Wire aliases (`l`, `r`, `al`, `ar`) exist only at the HTTP/relay edge.
 
 | Wire key | Channel id | Default port | Default GPIO |
 |---|---|---|---|
@@ -19,10 +19,10 @@ Aliases exist only at the HTTP/relay edge. `/ws` and relay `{"t":"pose","lr":"L,
 
 ## Two ActEngine instances
 
-[`firmware/act_engine.py`](../firmware/act_engine.py) plays sparse keyframes. The 2-leg body uses one instance (`l`,`r`). A 4-servo body constructs two:
+[`firmware/act_engine.py`](../firmware/act_engine.py) plays sparse keyframes keyed by **channel id**. The 2-leg body uses one instance (`leg_l`,`leg_r`). A 4-servo body constructs two:
 
-- **legs** — channels `l`,`r`. Walk, `/pose` legs, `/ws`, `/set` own this instance.
-- **arms** — channels `al`,`ar`. Arms-only `/act` and `/pose?al=&ar=` own this instance.
+- **legs** — channels `leg_l`,`leg_r`. Walk, `/pose` legs, `/ws`, `/set` own this instance.
+- **arms** — channels `arm_l`,`arm_r`. Arms-only `/act` and `/pose?al=&ar=` own this instance.
 
 Walk/pose/ws **must not** `clear()` the arms engine.
 
@@ -32,9 +32,9 @@ Dead-man (500 ms) stays on the legs stream. Arms `/act` keeps hold-then-limp.
 
 ## Transport
 
-Which file you copy as `main.py` is the transport: `robot-server.py` (LAN HTTP) or `relay_chip.py` (outbound relay). Do not infer relay from Wi-Fi secrets.
+Which file you copy as `main.py` is the transport: `robot-server.py` (LAN HTTP) or `relay_chip.py` (outbound relay). Do not infer relay from Wi-Fi secrets. Both import [`firmware/motion.py`](../firmware/motion.py) (write/release/enqueue) which owns two [`ActEngine`](../firmware/act_engine.py) instances.
 
-Missing `act_engine.py`: print and do not drive servos.
+Missing `channels.py`, `act_engine.py`, or `motion.py`: print and do not drive servos.
 
 ## Mind
 

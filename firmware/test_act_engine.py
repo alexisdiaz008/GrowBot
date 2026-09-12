@@ -1,134 +1,226 @@
-"""Hardware-free ActEngine tests. Run: python3 firmware/test_act_engine.py"""
-import sys
+"""Hardware-free ActEngine + channel-translation tests.
+
+Run: python3 firmware/test_act_engine.py
+"""
 import os
+import sys
+
 sys.path.insert(0, os.path.dirname(__file__))
-from act_engine import ActEngine
+
+from act_engine import ActEngine, subset_steps_for_channels
+from channels import (
+    ARM_CHANNEL_IDS,
+    CHANNEL_LEFT_ARM,
+    CHANNEL_LEFT_LEG,
+    CHANNEL_PORT,
+    CHANNEL_RIGHT_ARM,
+    CHANNEL_RIGHT_LEG,
+    CHANNEL_TO_WIRE,
+    ENQUEUE_MODE_APPEND,
+    ERROR_QUEUE_FULL,
+    KEYFRAME_MILLISECONDS_KEY,
+    LEG_CHANNEL_IDS,
+    SERVO_NEUTRAL_DEGREES,
+    WIRE_LEFT_ARM,
+    WIRE_LEFT_LEG,
+    WIRE_RIGHT_ARM,
+    WIRE_RIGHT_LEG,
+    WIRE_TO_CHANNEL,
+    translate_wire_steps_to_channels,
+    wire_keys_for_channel_ports,
+)
+
 
 class Clock:
     def __init__(self):
-        self.t = 0
+        self.now_milliseconds = 0
+
     def ticks_ms(self):
-        return self.t
-    def ticks_diff(self, a, b):
-        return a - b
-    def advance(self, ms):
-        self.t += ms
+        return self.now_milliseconds
+
+    def ticks_diff(self, later, earlier):
+        return later - earlier
+
+    def advance(self, milliseconds):
+        self.now_milliseconds += milliseconds
 
 
-def make(channels=("l", "r"), hold_ms=300):
+def make_engine(channels=LEG_CHANNEL_IDS, hold_milliseconds=300):
     clock = Clock()
     writes = []
     releases = []
+
     def write_pose(pose):
-        writes.append((clock.t, dict(pose)))
+        writes.append((clock.now_milliseconds, dict(pose)))
+
     def release():
-        releases.append(clock.t)
-    eng = ActEngine(write_pose, release, clock.ticks_ms, clock.ticks_diff,
-                    channels=channels, hold_ms=hold_ms)
-    return eng, clock, writes, releases
+        releases.append(clock.now_milliseconds)
+
+    engine = ActEngine(
+        write_pose, release, clock.ticks_ms, clock.ticks_diff,
+        channels=channels, hold_milliseconds=hold_milliseconds,
+    )
+    return engine, clock, writes, releases
 
 
-def tick_ms(eng, clock, ms, step=20):
-    end = clock.t + ms
-    while clock.t < end:
-        eng.tick()
-        clock.advance(step)
-    eng.tick()
+def tick_for(engine, clock, milliseconds, step_milliseconds=20):
+    end = clock.now_milliseconds + milliseconds
+    while clock.now_milliseconds < end:
+        engine.tick()
+        clock.advance(step_milliseconds)
+    engine.tick()
 
 
-def assert_eq(a, b, msg=""):
-    if a != b:
-        raise AssertionError("%s: %r != %r" % (msg, a, b))
+def assert_eq(actual, expected, message=""):
+    if actual != expected:
+        raise AssertionError("%s: %r != %r" % (message, actual, expected))
 
 
 def test_two_leg_wiggle_duration():
-    eng, clock, writes, releases = make()
-    ok, queued = eng.enqueue([
-        {"l": 120, "r": 60, "ms": 400},
-        {"l": 60, "r": 120, "ms": 400},
-        {"l": 90, "r": 90, "ms": 300},
+    engine, clock, writes, releases = make_engine()
+    succeeded, queued = engine.enqueue([
+        {CHANNEL_LEFT_LEG: 120, CHANNEL_RIGHT_LEG: 60, KEYFRAME_MILLISECONDS_KEY: 400},
+        {CHANNEL_LEFT_LEG: 60, CHANNEL_RIGHT_LEG: 120, KEYFRAME_MILLISECONDS_KEY: 400},
+        {CHANNEL_LEFT_LEG: SERVO_NEUTRAL_DEGREES, CHANNEL_RIGHT_LEG: SERVO_NEUTRAL_DEGREES,
+         KEYFRAME_MILLISECONDS_KEY: 300},
     ])
-    assert_eq(ok, True)
+    assert_eq(succeeded, True)
     assert_eq(queued, 1100)
-    tick_ms(eng, clock, 1100)
-    assert_eq(writes[0][1], {"l": 120, "r": 60})
+    tick_for(engine, clock, 1100)
+    assert_eq(writes[0][1], {CHANNEL_LEFT_LEG: 120, CHANNEL_RIGHT_LEG: 60})
     last = writes[-1][1]
-    assert_eq(last, {"l": 90, "r": 90})
-    tick_ms(eng, clock, 300)
+    assert_eq(last, {CHANNEL_LEFT_LEG: SERVO_NEUTRAL_DEGREES, CHANNEL_RIGHT_LEG: SERVO_NEUTRAL_DEGREES})
+    tick_for(engine, clock, 300)
     assert_eq(len(releases), 1)
-    assert_eq(eng.active, False)
+    assert_eq(engine.active, False)
 
 
 def test_omit_holds_channel():
-    eng, clock, writes, _ = make()
-    eng.enqueue([{"l": 50, "r": 130, "ms": 0}])
-    tick_ms(eng, clock, 20)
-    eng.enqueue([{"l": 80, "ms": 0}], mode="append")
-    tick_ms(eng, clock, 20)
-    assert_eq(writes[-1][1], {"l": 80, "r": 130})
+    engine, clock, writes, _releases = make_engine()
+    engine.enqueue([{CHANNEL_LEFT_LEG: 50, CHANNEL_RIGHT_LEG: 130, KEYFRAME_MILLISECONDS_KEY: 0}])
+    tick_for(engine, clock, 20)
+    engine.enqueue([{CHANNEL_LEFT_LEG: 80, KEYFRAME_MILLISECONDS_KEY: 0}], mode=ENQUEUE_MODE_APPEND)
+    tick_for(engine, clock, 20)
+    assert_eq(writes[-1][1], {CHANNEL_LEFT_LEG: 80, CHANNEL_RIGHT_LEG: 130})
 
 
 def test_two_instances_do_not_clear_each_other():
     clock = Clock()
-    leg_w, arm_w, leg_rel, arm_rel = [], [], [], []
-    legs = ActEngine(lambda p: leg_w.append(dict(p)), lambda: leg_rel.append(clock.t),
-                     clock.ticks_ms, clock.ticks_diff, channels=("l", "r"), hold_ms=300)
-    arms = ActEngine(lambda p: arm_w.append(dict(p)), lambda: arm_rel.append(clock.t),
-                     clock.ticks_ms, clock.ticks_diff, channels=("al", "ar"), hold_ms=300)
-    ok, _ = arms.enqueue([{"al": 40, "ar": 140, "ms": 400}])
-    assert_eq(ok, True)
-    # walk pose must not clear arms
+    leg_writes, arm_writes, leg_releases, arm_releases = [], [], [], []
+    legs = ActEngine(
+        lambda pose: leg_writes.append(dict(pose)),
+        lambda: leg_releases.append(clock.now_milliseconds),
+        clock.ticks_ms, clock.ticks_diff, channels=LEG_CHANNEL_IDS, hold_milliseconds=300,
+    )
+    arms = ActEngine(
+        lambda pose: arm_writes.append(dict(pose)),
+        lambda: arm_releases.append(clock.now_milliseconds),
+        clock.ticks_ms, clock.ticks_diff, channels=ARM_CHANNEL_IDS, hold_milliseconds=300,
+    )
+    succeeded, _queued = arms.enqueue([
+        {CHANNEL_LEFT_ARM: 40, CHANNEL_RIGHT_ARM: 140, KEYFRAME_MILLISECONDS_KEY: 400},
+    ])
+    assert_eq(succeeded, True)
     legs.clear()
-    for _ in range(10):
-        legs.tick(); arms.tick(); clock.advance(20)
+    for _index in range(10):
+        legs.tick()
+        arms.tick()
+        clock.advance(20)
     assert_eq(arms.active, True)
-    assert_eq(len(arm_w) > 0, True)
-    assert_eq(len(leg_w), 0)
+    assert_eq(len(arm_writes) > 0, True)
+    assert_eq(len(leg_writes), 0)
 
 
 def test_stop_both():
     clock = Clock()
-    rel = []
-    legs = ActEngine(lambda p: None, lambda: rel.append("l"),
-                     clock.ticks_ms, clock.ticks_diff, channels=("l", "r"))
-    arms = ActEngine(lambda p: None, lambda: rel.append("a"),
-                     clock.ticks_ms, clock.ticks_diff, channels=("al", "ar"))
-    legs.enqueue([{"l": 70, "r": 110, "ms": 800}])
-    arms.enqueue([{"al": 60, "ar": 120, "ms": 800}])
-    legs.clear(); arms.clear()
-    legs.release(); arms.release()
+    releases = []
+    legs = ActEngine(
+        lambda pose: None, lambda: releases.append("legs"),
+        clock.ticks_ms, clock.ticks_diff, channels=LEG_CHANNEL_IDS,
+    )
+    arms = ActEngine(
+        lambda pose: None, lambda: releases.append("arms"),
+        clock.ticks_ms, clock.ticks_diff, channels=ARM_CHANNEL_IDS,
+    )
+    legs.enqueue([{CHANNEL_LEFT_LEG: 70, CHANNEL_RIGHT_LEG: 110, KEYFRAME_MILLISECONDS_KEY: 800}])
+    arms.enqueue([{CHANNEL_LEFT_ARM: 60, CHANNEL_RIGHT_ARM: 120, KEYFRAME_MILLISECONDS_KEY: 800}])
+    legs.clear()
+    arms.clear()
+    legs.release()
+    arms.release()
     assert_eq(legs.active, False)
     assert_eq(arms.active, False)
-    assert_eq(sorted(rel), ["a", "l"])
+    assert_eq(sorted(releases), ["arms", "legs"])
 
 
 def test_queue_full():
-    eng, clock, _, _ = make()
-    ok, err = eng.enqueue([{"l": 90, "r": 90, "ms": 3000}] * 6)
-    assert_eq(ok, False)
-    assert_eq(err, "queue full")
+    engine, _clock, _writes, _releases = make_engine()
+    succeeded, error = engine.enqueue(
+        [{CHANNEL_LEFT_LEG: SERVO_NEUTRAL_DEGREES, CHANNEL_RIGHT_LEG: SERVO_NEUTRAL_DEGREES,
+          KEYFRAME_MILLISECONDS_KEY: 3000}] * 6
+    )
+    assert_eq(succeeded, False)
+    assert_eq(error, ERROR_QUEUE_FULL)
 
 
 def test_ignores_other_engine_keys():
-    eng, clock, writes, _ = make(channels=("al", "ar"))
-    ok, _ = eng.enqueue([{"l": 10, "r": 20, "al": 30, "ar": 40, "ms": 0}])
-    assert_eq(ok, True)
-    tick_ms(eng, clock, 20)
-    assert_eq(writes[-1][1], {"al": 30, "ar": 40})
+    engine, clock, writes, _releases = make_engine(channels=ARM_CHANNEL_IDS)
+    succeeded, _queued = engine.enqueue([{
+        CHANNEL_LEFT_LEG: 10, CHANNEL_RIGHT_LEG: 20,
+        CHANNEL_LEFT_ARM: 30, CHANNEL_RIGHT_ARM: 40,
+        KEYFRAME_MILLISECONDS_KEY: 0,
+    }])
+    assert_eq(succeeded, True)
+    tick_for(engine, clock, 20)
+    assert_eq(writes[-1][1], {CHANNEL_LEFT_ARM: 30, CHANNEL_RIGHT_ARM: 40})
 
 
-def test_subset_steps():
-    from act_engine import subset_steps
-    steps = [{"l": 10, "r": 20, "al": 30, "ar": 40, "ms": 100}]
-    assert_eq(subset_steps(steps, ("l", "r")), [{"l": 10, "r": 20, "ms": 100}])
-    assert_eq(subset_steps(steps, ("al", "ar")), [{"al": 30, "ar": 40, "ms": 100}])
-    assert_eq(subset_steps("soup", ("l", "r")), [])
-    assert_eq(subset_steps(None, ("l", "r")), [])
+def test_subset_steps_for_channels():
+    steps = [{
+        CHANNEL_LEFT_LEG: 10, CHANNEL_RIGHT_LEG: 20,
+        CHANNEL_LEFT_ARM: 30, CHANNEL_RIGHT_ARM: 40,
+        KEYFRAME_MILLISECONDS_KEY: 100,
+    }]
+    assert_eq(
+        subset_steps_for_channels(steps, LEG_CHANNEL_IDS),
+        [{CHANNEL_LEFT_LEG: 10, CHANNEL_RIGHT_LEG: 20, KEYFRAME_MILLISECONDS_KEY: 100}],
+    )
+    assert_eq(
+        subset_steps_for_channels(steps, ARM_CHANNEL_IDS),
+        [{CHANNEL_LEFT_ARM: 30, CHANNEL_RIGHT_ARM: 40, KEYFRAME_MILLISECONDS_KEY: 100}],
+    )
+    assert_eq(subset_steps_for_channels("soup", LEG_CHANNEL_IDS), [])
+    assert_eq(subset_steps_for_channels(None, LEG_CHANNEL_IDS), [])
+
+
+def test_translate_wire_steps_to_channel_ids():
+    steps = [{
+        WIRE_LEFT_LEG: 10, WIRE_RIGHT_LEG: 20,
+        WIRE_LEFT_ARM: 30, WIRE_RIGHT_ARM: 40,
+        KEYFRAME_MILLISECONDS_KEY: 100,
+    }]
+    assert_eq(translate_wire_steps_to_channels(steps), [{
+        CHANNEL_LEFT_LEG: 10, CHANNEL_RIGHT_LEG: 20,
+        CHANNEL_LEFT_ARM: 30, CHANNEL_RIGHT_ARM: 40,
+        KEYFRAME_MILLISECONDS_KEY: 100,
+    }])
+    assert_eq(translate_wire_steps_to_channels("soup"), [])
+    assert_eq(translate_wire_steps_to_channels(None), [])
+    assert_eq(translate_wire_steps_to_channels([{KEYFRAME_MILLISECONDS_KEY: 100}]), [])
+
+
+def test_wire_alias_tables_are_inverses():
+    for wire_key, channel_id in WIRE_TO_CHANNEL.items():
+        assert_eq(CHANNEL_TO_WIRE[channel_id], wire_key)
+    assert_eq(
+        wire_keys_for_channel_ports(CHANNEL_PORT),
+        [WIRE_LEFT_LEG, WIRE_RIGHT_LEG, WIRE_LEFT_ARM, WIRE_RIGHT_ARM],
+    )
 
 
 if __name__ == "__main__":
-    tests = [v for k, v in list(globals().items()) if k.startswith("test_")]
-    for fn in tests:
-        fn()
-        print("ok", fn.__name__)
+    tests = [value for name, value in list(globals().items()) if name.startswith("test_")]
+    for test_fn in tests:
+        test_fn()
+        print("ok", test_fn.__name__)
     print("%d passed" % len(tests))

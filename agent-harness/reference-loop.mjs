@@ -21,6 +21,16 @@ import { readFileSync, writeFileSync, existsSync, copyFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  ARG_TYPE_ARRAY,
+  ARG_TYPE_ENUM,
+  ARG_TYPE_NUMBER,
+  ARG_TYPE_STRING,
+  DEFAULT_MAX_MOTION_VERBS_PER_TICK,
+  KEYFRAME_MILLISECONDS_KEY,
+  VERB_NAME_FIELD,
+  usedChannelsForVerb,
+} from "./channels.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
@@ -65,81 +75,67 @@ const clean = (s, n) => String(s == null ? "" : s).replace(/\s+/g, " ").trim().s
 
 /* ── the verb menu, rendered from body_config into the prompt (face 2 of body config) ── */
 function verbMenu(body) {
-  const rows = body.verbs.map(v => {
-    const ex = v.examples ? "  e.g. " + v.examples.map(e => JSON.stringify(e)).join(" · ") : "";
-    return `- ${v.v} [${v.kind}] args ${JSON.stringify(v.args)} — ${v.guide}${ex}`;
+  const rows = body.verbs.map(verb => {
+    const examples = verb.examples ? "  e.g. " + verb.examples.map(example => JSON.stringify(example)).join(" · ") : "";
+    return `- ${verb[VERB_NAME_FIELD]} [${verb.kind}] args ${JSON.stringify(verb.args)} — ${verb.guide}${examples}`;
   }).join("\n");
+  const maxMotion = body.limits?.max_motion_verbs_per_tick ?? DEFAULT_MAX_MOTION_VERBS_PER_TICK;
   return "\n\n== OUTPUT — reply with ONLY one line of minified JSON ==\n" +
     '{"verbs":[{"v":"<name>","args":{...}}],"memory":{"state":"short current-state phrase","mood":{"v":0.2,"e":0.4},' +
     '"log":"one diary-worthy line, OMIT for routine moments","identity_proposal":"OMIT unless something profound shifted — only a dream can approve it"}}\n' +
     "Your body's verb menu — the ONLY verbs that exist; anything else is dropped by the harness:\n" + rows +
     "\n\nRules: to ACT you must emit the verb in THIS reply — saying you will do something does nothing (narration is not action). " +
-    `At most ${body.limits?.max_motion_verbs_per_tick ?? 1} motion verb per tick. ` +
+    `At most ${maxMotion} motion verb per tick. ` +
     '"verbs":[] is a fine answer when the moment has not earned one. mood is slow inner weather: v -1 gloomy..1 joyful, e 0 still..1 buzzing; drift it gently.' +
     (body.movement_guide ? "\n\n== YOUR BODY ==\n" + body.movement_guide : "");
 }
 
 /* ── validate a verb call against the menu: off-menu → reject; args → clamp to the body's hard limits ── */
 function validateVerb(call, body) {
-  if (!call || typeof call.v !== "string") return { ok: false, why: "malformed verb call" };
-  const spec = body.verbs.find(x => x.v === call.v);
-  if (!spec) return { ok: false, why: `off-menu verb '${call.v}'` };
+  if (!call || typeof call[VERB_NAME_FIELD] !== "string") return { ok: false, why: "malformed verb call" };
+  const spec = body.verbs.find(verb => verb[VERB_NAME_FIELD] === call[VERB_NAME_FIELD]);
+  if (!spec) return { ok: false, why: `off-menu verb '${call[VERB_NAME_FIELD]}'` };
   const out = {};
-  for (const [name, s] of Object.entries(spec.args || {})) {
-    let val = call.args ? call.args[name] : undefined;
-    if (s.type === "string") {
-      if (typeof val !== "string" || !val.trim()) return { ok: false, why: `${call.v}.${name} must be a non-empty string` };
-      if (s.max_words) val = val.trim().split(/\s+/).slice(0, s.max_words).join(" ");
-    } else if (s.type === "enum") {
-      if (!s.values.includes(val)) return { ok: false, why: `${call.v}.${name}='${val}' not in enum` };
-    } else if (s.type === "number") {
-      if (typeof val !== "number" || !isFinite(val)) return { ok: false, why: `${call.v}.${name} must be a number` };
-      val = clamp(val, s.min ?? -Infinity, s.max ?? Infinity);
-    } else if (s.type === "array") {
-      if (!Array.isArray(val) || !val.length) return { ok: false, why: `${call.v}.${name} must be a non-empty array` };
-      const optional = new Set(s.optional || []);
-      val = val.slice(0, s.max_items ?? val.length).map(item => {
-        const o = {};
-        for (const [f, range] of Object.entries(s.items)) {
-          if (item?.[f] === undefined || item[f] === null) {
-            if (optional.has(f)) continue;
+  for (const [name, argSpec] of Object.entries(spec.args || {})) {
+    let value = call.args ? call.args[name] : undefined;
+    if (argSpec.type === ARG_TYPE_STRING) {
+      if (typeof value !== "string" || !value.trim()) return { ok: false, why: `${call[VERB_NAME_FIELD]}.${name} must be a non-empty string` };
+      if (argSpec.max_words) value = value.trim().split(/\s+/).slice(0, argSpec.max_words).join(" ");
+    } else if (argSpec.type === ARG_TYPE_ENUM) {
+      if (!argSpec.values.includes(value)) return { ok: false, why: `${call[VERB_NAME_FIELD]}.${name}='${value}' not in enum` };
+    } else if (argSpec.type === ARG_TYPE_NUMBER) {
+      if (typeof value !== "number" || !isFinite(value)) return { ok: false, why: `${call[VERB_NAME_FIELD]}.${name} must be a number` };
+      value = clamp(value, argSpec.min ?? -Infinity, argSpec.max ?? Infinity);
+    } else if (argSpec.type === ARG_TYPE_ARRAY) {
+      if (!Array.isArray(value) || !value.length) return { ok: false, why: `${call[VERB_NAME_FIELD]}.${name} must be a non-empty array` };
+      const optional = new Set(argSpec.optional || []);
+      value = value.slice(0, argSpec.max_items ?? value.length).map(item => {
+        const mapped = {};
+        for (const [field, range] of Object.entries(argSpec.items)) {
+          if (item?.[field] === undefined || item[field] === null) {
+            if (optional.has(field)) continue;
             return null;
           }
-          const n = Number(item[f]);
-          if (!isFinite(n)) return null;
-          o[f] = clamp(n, range[0], range[1]);
+          const number = Number(item[field]);
+          if (!isFinite(number)) return null;
+          mapped[field] = clamp(number, range[0], range[1]);
         }
-        if (optional.size && !Object.keys(o).some(k => k !== "ms")) return null;
-        return o;
+        if (optional.size && !Object.keys(mapped).some(key => key !== KEYFRAME_MILLISECONDS_KEY)) return null;
+        return mapped;
       });
-      if (val.some(x => x === null)) return { ok: false, why: `${call.v}.${name} has a malformed item` };
+      if (value.some(item => item === null)) return { ok: false, why: `${call[VERB_NAME_FIELD]}.${name} has a malformed item` };
     }
-    out[name] = val;
+    out[name] = value;
   }
-  return { ok: true, v: spec.v, motion: !!spec.motion, args: out, spec };
-}
-
-const WIRE_KEYS = { l: "leg_l", r: "leg_r", al: "arm_l", ar: "arm_r" };
-function usedChannels(v) {
-  if (v.v === "gesture" && Array.isArray(v.args.steps)) {
-    const used = new Set();
-    for (const st of v.args.steps) {
-      for (const k of Object.keys(st)) {
-        if (k === "ms") continue;
-        used.add(WIRE_KEYS[k] || k);
-      }
-    }
-    return [...used];
-  }
-  return v.spec.channels || [];
+  return { ok: true, [VERB_NAME_FIELD]: spec[VERB_NAME_FIELD], motion: !!spec.motion, args: out, spec };
 }
 
 /* ── THE ACTUATOR. The phone's speaker/screen — here the terminal stands in for it.
       To drive real hardware, replace ONLY this function (SPEC-BODY-CONFIG.md §5).
       Same verbs in, different actuator listening — that is the whole design bet. ── */
-function actuate(v) {
-  const icon = { say: "🗣", sound: "🔔", sing: "🎵", burst: "✨", gesture: "🦾", walk: "🚶", arms: "🙌", rest: "⏸" }[v.v] || "▶";
-  console.log(`  ${icon} ${v.v} ${JSON.stringify(v.args)}`);
+function actuate(verb) {
+  const icon = { say: "🗣", sound: "🔔", sing: "🎵", burst: "✨", gesture: "🦾", walk: "🚶", arms: "🙌", rest: "⏸" }[verb[VERB_NAME_FIELD]] || "▶";
+  console.log(`  ${icon} ${verb[VERB_NAME_FIELD]} ${JSON.stringify(verb.args)}`);
 }
 
 /* ── prompt assembly: constitution → SAFETY FLOOR → identity → wants → working memory → diary slice → verb menu ── */
@@ -267,33 +263,32 @@ async function tick(event, fromPerson) {
   tickN++;
   console.log(`\n— tick ${tickN} · ${event}`);
   try {
-    const o = tryParse(await callModel(buildSystem(), buildMessages(event), false));
-    if (!o) { console.log("  (unparseable reply dropped)"); return; }
+    const parsedReply = tryParse(await callModel(buildSystem(), buildMessages(event), false));
+    if (!parsedReply) { console.log("  (unparseable reply dropped)"); return; }
     const executed = [];
     let motions = 0;
     const claimed = new Set();
-    for (const call of Array.isArray(o.verbs) ? o.verbs : []) {
-      const v = validateVerb(call, BODY);
-      if (!v.ok) { console.log("  ✗ REJECTED — " + v.why); continue; }
-      if (v.motion) {
-        const chs = usedChannels(v);
-        if (chs.some(c => claimed.has(c))) { console.log("  ✗ REJECTED — channel overlap with another motion verb this tick"); continue; }
-        if (++motions > (BODY.limits?.max_motion_verbs_per_tick ?? 1)) { console.log("  ✗ REJECTED — motion budget spent this tick"); continue; }
-        for (const c of chs) claimed.add(c);
+    const maxMotion = BODY.limits?.max_motion_verbs_per_tick ?? DEFAULT_MAX_MOTION_VERBS_PER_TICK;
+    for (const call of Array.isArray(parsedReply.verbs) ? parsedReply.verbs : []) {
+      const verb = validateVerb(call, BODY);
+      if (!verb.ok) { console.log("  ✗ REJECTED — " + verb.why); continue; }
+      if (verb.motion) {
+        const channelIds = usedChannelsForVerb(verb, BODY);
+        if (channelIds.some(channelId => claimed.has(channelId))) { console.log("  ✗ REJECTED — channel overlap with another motion verb this tick"); continue; }
+        if (++motions > maxMotion) { console.log("  ✗ REJECTED — motion budget spent this tick"); continue; }
+        for (const channelId of channelIds) claimed.add(channelId);
       }
-      actuate(v); executed.push(v);
+      actuate(verb); executed.push(verb);
     }
     /* route memory writes by region permission (the loop may NEVER write identity) */
-    const m = o.memory || {}, wm = mem.working_memory;
-    if (typeof m.state === "string") wm.state = clean(m.state, 90);
-    if (m.mood && typeof m.mood.v === "number") wm.mood = { v: clamp(m.mood.v, -1, 1), e: clamp(typeof m.mood.e === "number" ? m.mood.e : wm.mood.e, 0, 1) };
-    if (typeof m.log === "string") logAppend(m.log);
-    if (typeof m.identity_proposal === "string" && m.identity_proposal) wm.pending_identity_proposal = clean(m.identity_proposal, 200);   // STAGED only — the dream judges it
-    /* trace discipline — the "lobotomy" fix: ONLY a real exchange earns a slot. A quiet beat the
-       creature ignored must never evict real conversation. */
+    const memoryWrite = parsedReply.memory || {}, workingMemory = mem.working_memory;
+    if (typeof memoryWrite.state === "string") workingMemory.state = clean(memoryWrite.state, 90);
+    if (memoryWrite.mood && typeof memoryWrite.mood.v === "number") workingMemory.mood = { v: clamp(memoryWrite.mood.v, -1, 1), e: clamp(typeof memoryWrite.mood.e === "number" ? memoryWrite.mood.e : workingMemory.mood.e, 0, 1) };
+    if (typeof memoryWrite.log === "string") logAppend(memoryWrite.log);
+    if (typeof memoryWrite.identity_proposal === "string" && memoryWrite.identity_proposal) workingMemory.pending_identity_proposal = clean(memoryWrite.identity_proposal, 200);
     if (fromPerson || executed.length) {
-      wm.traces.push({ u: clean(event, 160), a: executed.map(v => v.v + " " + JSON.stringify(v.args)).join(" · ") || "(stayed with it, quietly)" });
-      wm.traces = wm.traces.slice(-8);
+      workingMemory.traces.push({ u: clean(event, 160), a: executed.map(verb => verb[VERB_NAME_FIELD] + " " + JSON.stringify(verb.args)).join(" · ") || "(stayed with it, quietly)" });
+      workingMemory.traces = workingMemory.traces.slice(-8);
     }
     save();
     if (tickN % DREAM_EVERY === 0) { await dream("a natural rest after " + DREAM_EVERY + " ticks"); lastDreamTick = tickN; save(); }

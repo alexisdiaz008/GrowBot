@@ -77,8 +77,8 @@ path).
 ## Install
 
 1. Flash the normal GrowBot Pico build from **https://growbot.dev/build** (the
-   one-click flasher). That gives you `secrets.py`, `act_engine.py` and
-   `relay_chip.py` as `main.py`, which is the brain link plus the protocol.
+   one-click flasher). That gives you `secrets.py`, `channels.py`, `act_engine.py`,
+   `motion.py`, and `relay_chip.py` as `main.py`, which is the brain link plus the protocol.
 2. Copy this driver over the servo one:
 
 ```bash

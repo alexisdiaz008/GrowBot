@@ -3,132 +3,175 @@ PicoRobotics.py  --  GrowBot auto-detecting servo driver.
 
 Drop this on the Pico as  PicoRobotics.py . The programs on top all call:
     board = KitronikPicoRobotics()
-    board.servoWrite(port, deg)        # port 1 = LEFT, port 3 = RIGHT; deg 0..180
+    board.servoWrite(port, degrees)
+    board.release(port)
 ...and don't care what's underneath. This file picks the driver at boot:
 
   * CARRIER BOARD (I2C / PCA9685 chip, e.g. Kitronik Robotics @0x6C,
     generic PCA9685 @0x40 on GP8/GP9) -> detected on the I2C bus, driven over I2C.
         [VERIFIED on the Kitronik Robotics Board 5329]
   * DIRECT-WIRE (no chip on the bus) -> servos driven straight off
-    GP0 (left) / GP1 (right) with hardware PWM.
-        [VERIFIED 2026-07-27 on the Waveshare Pico Servo Driver. That board
-         carries NO PCA9685 -- an I2C sweep of every legal pin pair found
-         nothing on the bus -- so every Waveshare build runs this path, and
-         its silkscreen socket numbers ARE the GPIO numbers: 0 = left,
-         1 = right. Same path for a bare Pico with servos on GP0/GP1.]
+    GP0 (left leg) / GP1 (right leg) / GP2 (left arm) / GP3 (right arm)
+    with hardware PWM.
+        [VERIFIED 2026-07-27 on the Waveshare Pico Servo Driver.]
 
 Ports:  1 = left leg, 3 = right leg, 4 = left arm, 5 = right arm
-(port 2 is the dead socket on the Kitronik board). CHANNEL_PORT maps wire keys
-l/r/al/ar onto those ports. Pins are firmware truth, not body_config.
+(port 2 is the unused socket on the Kitronik board). CHANNEL_PORT maps
+channel ids onto those ports. Pins are firmware truth, not body_config.
 
-ADVANCED override (skip auto-detect): set FORCE = "i2c" or "gpio" below, and
-edit the I2C pins / addresses or GPIO_PINS for an unusual board.
+Requires channels.py on the chip (same directory).
+
+ADVANCED override (skip auto-detect): set FORCE_DRIVER below, and edit the
+I2C pins / addresses or PORT_TO_GPIO for an unusual board.
 """
-import machine, utime
+import machine
+import utime
 from machine import Pin, PWM
 
-# ---- config / manual override -------------------------------------------
-FORCE      = None            # None = auto-detect ; or "i2c" / "gpio"
-I2C_ID     = 0               # Kitronik Robotics board: I2C0 ...
-SDA_PIN    = 8               # ... SDA on GP8 ...
-SCL_PIN    = 9               # ... SCL on GP9
-CHIP_ADDRS = (0x6C, 0x40)    # Kitronik = 0x6C, generic PCA9685 = 0x40
-CHANNEL_PORT = {"l": 1, "r": 3, "al": 4, "ar": 5}  # wire key -> driver port
-GPIO_PINS  = {1: 0, 3: 1, 4: 2, 5: 3}  # port -> GPIO (1/3 legs GP0/GP1, 4/5 arms GP2/GP3)
+from channels import (
+    CHANNEL_PORT,
+    GPIO_LEFT_ARM,
+    GPIO_LEFT_LEG,
+    GPIO_RIGHT_ARM,
+    GPIO_RIGHT_LEG,
+    PORT_TO_GPIO,
+    SERVO_MAX_DEGREES,
+    SERVO_MIN_DEGREES,
+)
+
+DRIVER_I2C = "i2c"
+DRIVER_GPIO = "gpio"
+FORCE_DRIVER = None
+
+I2C_BUS_ID = 0
+I2C_SDA_PIN = 8
+I2C_SCL_PIN = 9
+I2C_FREQUENCY_HZ = 100000
+KITRONIK_CHIP_ADDRESS = 0x6C
+GENERIC_PCA9685_ADDRESS = 0x40
+CHIP_ADDRESSES = (KITRONIK_CHIP_ADDRESS, GENERIC_PCA9685_ADDRESS)
+
+SERVO_PWM_FREQUENCY_HZ = 50
+PULSE_MINIMUM_MICROSECONDS = 500
+PULSE_MAXIMUM_MICROSECONDS = 2500
+PWM_DUTY_MAX = 65535
+PERIOD_MICROSECONDS = 1_000_000 // SERVO_PWM_FREQUENCY_HZ
+
+PCA9685_SERVO_REGISTER_BASE = 0x08
+PCA9685_REGISTER_STRIDE = 4
+PCA9685_PRESCALE_BYTES = b"\x79"
+PCA9685_MODE1_WAKE_ALLCALL = b"\x01"
+PCA9685_FULL_OFF_FLAG = 0x10
+PCA9685_GENERAL_CALL_RESET = b"\x06"
+PCA9685_PRESCALE_REGISTER = 0xfe
+PCA9685_ALL_LED_REGISTERS = (0xfa, 0xfb, 0xfc, 0xfd)
+PCA9685_MODE1_REGISTER = 0x00
+PCA9685_DEGREES_TO_TICKS = 2.2755
+PCA9685_TICKS_OFFSET = 102
+I2C_SETTLE_MICROSECONDS = 500
 
 
-# ---- I2C / PCA9685 driver (carrier board) --- verbatim Kitronik logic ----
-class _I2CBoard:
-    SRV_REG_BASE = 0x08
-    REG_OFFSET   = 4
-    PRESCALE_VAL = b'\x79'           # prescale 121 -> ~50 Hz servo frame
+def _clamp_servo_degrees(degrees):
+    if degrees < SERVO_MIN_DEGREES:
+        return SERVO_MIN_DEGREES
+    if degrees > SERVO_MAX_DEGREES:
+        return SERVO_MAX_DEGREES
+    return degrees
 
-    def __init__(self, addr):
-        self.CHIP_ADDRESS = addr
-        self.i2c = machine.I2C(I2C_ID, sda=Pin(SDA_PIN), scl=Pin(SCL_PIN), freq=100000)
+
+class I2cServoBoard:
+    def __init__(self, address):
+        self.chip_address = address
+        self.i2c = machine.I2C(
+            I2C_BUS_ID,
+            sda=Pin(I2C_SDA_PIN),
+            scl=Pin(I2C_SCL_PIN),
+            freq=I2C_FREQUENCY_HZ,
+        )
         self.initPCA()
 
     def initPCA(self):
-        self.i2c.writeto(0, b'\x06')                       # general-call reset
-        self.i2c.writeto_mem(self.CHIP_ADDRESS, 0xfe, self.PRESCALE_VAL)
-        for r in (0xfa, 0xfb, 0xfc, 0xfd):                 # clear ALL_LED on/off
-            self.i2c.writeto_mem(self.CHIP_ADDRESS, r, b'\x00')
-        self.i2c.writeto_mem(self.CHIP_ADDRESS, 0x00, b'\x01')   # MODE1: wake + allcall
-        utime.sleep_us(500)
+        self.i2c.writeto(0, PCA9685_GENERAL_CALL_RESET)
+        self.i2c.writeto_mem(self.chip_address, PCA9685_PRESCALE_REGISTER, PCA9685_PRESCALE_BYTES)
+        for register in PCA9685_ALL_LED_REGISTERS:
+            self.i2c.writeto_mem(self.chip_address, register, b"\x00")
+        self.i2c.writeto_mem(self.chip_address, PCA9685_MODE1_REGISTER, PCA9685_MODE1_WAKE_ALLCALL)
+        utime.sleep_us(I2C_SETTLE_MICROSECONDS)
 
     def servoWrite(self, servo, degrees):
-        degrees = 0 if degrees < 0 else 180 if degrees > 180 else degrees
+        degrees = _clamp_servo_degrees(degrees)
         if servo < 1 or servo > 8:
             raise Exception("INVALID SERVO NUMBER")
-        reg = self.SRV_REG_BASE + (servo - 1) * self.REG_OFFSET
-        v = int(degrees * 2.2755) + 102                    # 0deg ~0.5ms .. 180deg ~2.5ms
-        self.i2c.writeto_mem(self.CHIP_ADDRESS, reg,     bytes([v & 0xFF]))
-        self.i2c.writeto_mem(self.CHIP_ADDRESS, reg + 1, bytes([(v >> 8) & 0x01]))
+        register = PCA9685_SERVO_REGISTER_BASE + (servo - 1) * PCA9685_REGISTER_STRIDE
+        ticks = int(degrees * PCA9685_DEGREES_TO_TICKS) + PCA9685_TICKS_OFFSET
+        self.i2c.writeto_mem(self.chip_address, register, bytes([ticks & 0xFF]))
+        self.i2c.writeto_mem(self.chip_address, register + 1, bytes([(ticks >> 8) & 0x01]))
 
     def release(self, servo):
-        reg = self.SRV_REG_BASE + (servo - 1) * self.REG_OFFSET
-        self.i2c.writeto_mem(self.CHIP_ADDRESS, reg + 1, bytes([0x10]))   # full-off -> limp
+        register = PCA9685_SERVO_REGISTER_BASE + (servo - 1) * PCA9685_REGISTER_STRIDE
+        self.i2c.writeto_mem(self.chip_address, register + 1, bytes([PCA9685_FULL_OFF_FLAG]))
 
 
-# ---- GPIO driver (direct-wire) --- verified on the Waveshare Pico Servo Driver ----
-_FREQ = 50
-_MIN_US, _MAX_US = 500, 2500
-_PERIOD_US = 1_000_000 // _FREQ
+def duty_from_degrees(degrees):
+    degrees = _clamp_servo_degrees(degrees)
+    pulse_microseconds = (
+        PULSE_MINIMUM_MICROSECONDS
+        + (PULSE_MAXIMUM_MICROSECONDS - PULSE_MINIMUM_MICROSECONDS) * degrees / SERVO_MAX_DEGREES
+    )
+    return int(pulse_microseconds / PERIOD_MICROSECONDS * PWM_DUTY_MAX)
 
-def _duty(deg):
-    deg = 0 if deg < 0 else 180 if deg > 180 else deg
-    us = _MIN_US + (_MAX_US - _MIN_US) * deg / 180
-    return int(us / _PERIOD_US * 65535)
 
-class _FakeI2C:
-    """robot-server's release() pokes a PCA9685 register; decode it back to a port -> limp."""
-    def __init__(self, owner):
-        self._o = owner
-    def writeto_mem(self, addr, reg, data):
-        off = reg - 0x0B
-        if off >= 0 and off % 4 == 0:
-            self._o.release(off // 4 + 1)
-
-class _GPIOBoard:
+class GpioServoBoard:
     def __init__(self):
         self.pwm = {}
-        for port, gp in GPIO_PINS.items():
-            p = PWM(Pin(gp)); p.freq(_FREQ); p.duty_u16(0)
-            self.pwm[port] = p
-        self.i2c = _FakeI2C(self)
-    def servoWrite(self, port, deg):
-        p = self.pwm.get(port)
-        if p:
-            p.duty_u16(_duty(deg))
+        for port, gpio_pin in PORT_TO_GPIO.items():
+            pulse = PWM(Pin(gpio_pin))
+            pulse.freq(SERVO_PWM_FREQUENCY_HZ)
+            pulse.duty_u16(0)
+            self.pwm[port] = pulse
+
+    def servoWrite(self, port, degrees):
+        pulse = self.pwm.get(port)
+        if pulse:
+            pulse.duty_u16(duty_from_degrees(degrees))
+
     def release(self, port):
-        p = self.pwm.get(port)
-        if p:
-            p.duty_u16(0)
+        pulse = self.pwm.get(port)
+        if pulse:
+            pulse.duty_u16(0)
 
 
-# ---- auto-detect factory -------------------------------------------------
-def _detect_addr():
+def _detect_chip_address():
     try:
-        bus = machine.I2C(I2C_ID, sda=Pin(SDA_PIN), scl=Pin(SCL_PIN), freq=100000)
+        bus = machine.I2C(
+            I2C_BUS_ID,
+            sda=Pin(I2C_SDA_PIN),
+            scl=Pin(I2C_SCL_PIN),
+            freq=I2C_FREQUENCY_HZ,
+        )
         found = bus.scan()
-        for a in CHIP_ADDRS:
-            if a in found:
-                return a
+        for address in CHIP_ADDRESSES:
+            if address in found:
+                return address
     except Exception:
         pass
     return None
 
+
 def KitronikPicoRobotics():
-    """Factory: an I2C board driver if a servo chip is on the bus, else direct-wire GPIO."""
-    mode = FORCE
-    addr = None
+    """Factory: I2C board driver if a servo chip is on the bus, else GPIO."""
+    mode = FORCE_DRIVER
+    address = None
     if mode is None:
-        addr = _detect_addr()
-        mode = "i2c" if addr is not None else "gpio"
-    elif mode == "i2c":
-        addr = CHIP_ADDRS[0]
-    if mode == "i2c":
-        print("PicoRobotics: I2C servo board detected @", hex(addr))
-        return _I2CBoard(addr)
-    print("PicoRobotics: no I2C chip -> direct-wire, GP0/GP1 = legs, GP2/GP3 = arms")
-    return _GPIOBoard()
+        address = _detect_chip_address()
+        mode = DRIVER_I2C if address is not None else DRIVER_GPIO
+    elif mode == DRIVER_I2C:
+        address = CHIP_ADDRESSES[0]
+    if mode == DRIVER_I2C:
+        print("PicoRobotics: I2C servo board detected @", hex(address))
+        return I2cServoBoard(address)
+    print(
+        "PicoRobotics: no I2C chip -> direct-wire, GP%d/GP%d = legs, GP%d/GP%d = arms"
+        % (GPIO_LEFT_LEG, GPIO_RIGHT_LEG, GPIO_LEFT_ARM, GPIO_RIGHT_ARM)
+    )
+    return GpioServoBoard()

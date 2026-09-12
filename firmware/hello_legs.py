@@ -1,6 +1,6 @@
 # hello_legs.py  --  GrowBot body check + servo-center for gluing.
 # Copy to your Pico as  main.py , then power it on (battery; USB unplugged).
-# You also need  PicoRobotics.py  on the Pico (it comes with the kit).
+# You also need  PicoRobotics.py  and  channels.py  on the Pico (they come with the kit).
 #
 # It runs the 4-check TWICE, then HOLDS both legs at 90 (slow LED blink):
 #   1) CENTER  - both legs to 90 (straight out)
@@ -20,8 +20,9 @@
 import time
 from machine import Pin
 from PicoRobotics import KitronikPicoRobotics
+from channels import PORT_LEFT_LEG, PORT_RIGHT_LEG, SERVO_NEUTRAL_DEGREES
 
-LEFT, RIGHT = 1, 3          # servo ports: left leg = 1, right leg = 3  (port 2 is dead)
+LEFT, RIGHT = PORT_LEFT_LEG, PORT_RIGHT_LEG
 board = KitronikPicoRobotics()
 
 try:
@@ -40,32 +41,32 @@ def wave(port, times=3):        # wave ONE leg around 90 while the other holds s
     for _ in range(times):
         board.servoWrite(port, 60);  time.sleep_ms(250)
         board.servoWrite(port, 120); time.sleep_ms(250)
-    board.servoWrite(port, 90)
+    board.servoWrite(port, SERVO_NEUTRAL_DEGREES)
 
 def sweep_both(lo=40, hi=140):  # both legs travel together
-    d = lo
-    while d <= hi:
-        board.servoWrite(LEFT, d); board.servoWrite(RIGHT, d)
+    degrees = lo
+    while degrees <= hi:
+        board.servoWrite(LEFT, degrees); board.servoWrite(RIGHT, degrees)
         if led: led.toggle()
-        time.sleep_ms(12); d += 2
-    while d >= lo:
-        board.servoWrite(LEFT, d); board.servoWrite(RIGHT, d)
+        time.sleep_ms(12); degrees += 2
+    while degrees >= lo:
+        board.servoWrite(LEFT, degrees); board.servoWrite(RIGHT, degrees)
         if led: led.toggle()
-        time.sleep_ms(12); d -= 2
+        time.sleep_ms(12); degrees -= 2
 
 # --- run the 4-check twice ---
 for cycle in range(2):
     print("1) CENTER"); flash(1, 400, 200)
-    board.servoWrite(LEFT, 90); board.servoWrite(RIGHT, 90); time.sleep_ms(900)
+    board.servoWrite(LEFT, SERVO_NEUTRAL_DEGREES); board.servoWrite(RIGHT, SERVO_NEUTRAL_DEGREES); time.sleep_ms(900)
     print("2) RIGHT");  flash(2); wave(RIGHT); time.sleep_ms(400)
     print("3) LEFT");   flash(3); wave(LEFT);  time.sleep_ms(400)
     print("4) BOTH");   flash(4); sweep_both(); sweep_both()
-    board.servoWrite(LEFT, 90); board.servoWrite(RIGHT, 90); time.sleep_ms(600)
+    board.servoWrite(LEFT, SERVO_NEUTRAL_DEGREES); board.servoWrite(RIGHT, SERVO_NEUTRAL_DEGREES); time.sleep_ms(600)
 
 # --- then HOLD at 90 forever: glue the legs straight out while it holds ---
 print("HOLDING at 90 - glue legs straight out now")
 flash(3, 80, 80)
 while True:
-    board.servoWrite(LEFT, 90); board.servoWrite(RIGHT, 90)
+    board.servoWrite(LEFT, SERVO_NEUTRAL_DEGREES); board.servoWrite(RIGHT, SERVO_NEUTRAL_DEGREES)
     if led: led.toggle()
     time.sleep_ms(500)
