@@ -3,42 +3,41 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  VERB_GESTURE,
+  VERB_NAME_FIELD,
+  WIRE_LEFT_ARM,
+  WIRE_LEFT_LEG,
+  WIRE_RIGHT_ARM,
+  WIRE_RIGHT_LEG,
+  KEYFRAME_MILLISECONDS_KEY,
+  channelSetsOverlap,
+} from "./channels.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const body = JSON.parse(readFileSync(join(HERE, "body_config.walker4.json"), "utf8"));
-const WIRE_KEYS = { l: "leg_l", r: "leg_r", al: "arm_l", ar: "arm_r" };
 
-function usedChannels(v) {
-  if (v.v === "gesture" && Array.isArray(v.args.steps)) {
-    const used = new Set();
-    for (const st of v.args.steps) {
-      for (const k of Object.keys(st)) {
-        if (k === "ms") continue;
-        used.add(WIRE_KEYS[k] || k);
-      }
-    }
-    return [...used];
-  }
-  const spec = body.verbs.find(x => x.v === v.v);
-  return spec?.channels || [];
-}
+const VERB_WALK = "walk";
+const VERB_ARMS = "arms";
+const VERB_REST = "rest";
 
-function overlap(a, b) {
-  const claimed = new Set(usedChannels(a));
-  return usedChannels(b).some(c => claimed.has(c));
-}
-
-const walk = { v: "walk", args: { secs: 1 } };
-const arms = { v: "arms", args: { secs: 1 } };
-const gLegs = { v: "gesture", args: { steps: [{ l: 60, r: 120, ms: 400 }] } };
-const gArms = { v: "gesture", args: { steps: [{ al: 50, ar: 130, ms: 400 }] } };
-const rest = { v: "rest", args: {} };
+const walk = { [VERB_NAME_FIELD]: VERB_WALK, args: { secs: 1 } };
+const arms = { [VERB_NAME_FIELD]: VERB_ARMS, args: { secs: 1 } };
+const gestureLegs = {
+  [VERB_NAME_FIELD]: VERB_GESTURE,
+  args: { steps: [{ [WIRE_LEFT_LEG]: 60, [WIRE_RIGHT_LEG]: 120, [KEYFRAME_MILLISECONDS_KEY]: 400 }] },
+};
+const gestureArms = {
+  [VERB_NAME_FIELD]: VERB_GESTURE,
+  args: { steps: [{ [WIRE_LEFT_ARM]: 50, [WIRE_RIGHT_ARM]: 130, [KEYFRAME_MILLISECONDS_KEY]: 400 }] },
+};
+const rest = { [VERB_NAME_FIELD]: VERB_REST, args: {} };
 
 const cases = [
-  ["walk + arms disjoint", overlap(walk, arms), false],
-  ["walk + arms-only gesture disjoint", overlap(walk, gArms), false],
-  ["walk + leg gesture overlaps", overlap(walk, gLegs), true],
-  ["arms + rest overlaps", overlap(arms, rest), true],
+  ["walk + arms disjoint", channelSetsOverlap(walk, arms, body), false],
+  ["walk + arms-only gesture disjoint", channelSetsOverlap(walk, gestureArms, body), false],
+  ["walk + leg gesture overlaps", channelSetsOverlap(walk, gestureLegs, body), true],
+  ["arms + rest overlaps", channelSetsOverlap(arms, rest, body), true],
 ];
 
 let failed = 0;

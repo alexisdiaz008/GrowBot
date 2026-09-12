@@ -52,6 +52,7 @@ State persists in `memory.json` between runs — the creature you talk to tomorr
 | [body_config.walker.json](body_config.walker.json) | 2-leg motor body (same phone verbs plus gesture/walk/rest) |
 | [body_config.walker4.json](body_config.walker4.json) | legs + arms; `walk` and `arms` may share a tick |
 | [test_disjoint.mjs](test_disjoint.mjs) | walker4 channel-overlap checks (`walk` + `arms` legal; `walk` + leg `gesture` not) |
+| [channels.mjs](channels.mjs) | channel ids, wire aliases, and disjoint-ownership helper used by the loop and tests |
 | [reference-loop.mjs](reference-loop.mjs) | ~300-line runnable harness: one loop, one model, the full write-permission discipline |
 | `prompts/` | the fixed regions, verbatim from the shipped engine: `constitution.txt` (swappable persona) · `safety-floor.txt` (engine-owned, always appended, never editable) · `dream.txt` (the consolidation pass). Kept verbatim on purpose, so some clauses reference phone senses (camera, mic, touch) the terminal reference doesn't feed — the creature copes; trim the persona for your rig freely. |
 | [memory.seed.json](memory.seed.json) | a fresh creature: seeded identity (with a movement temperament — never ship a blank), empty log |

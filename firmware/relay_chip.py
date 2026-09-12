@@ -33,50 +33,94 @@
 # The walk dead-man below is a FEATURE (limp on pose silence) and is separate from this.
 import network, socket, ssl, os, json, time, binascii, select, machine
 try:
-    from act_engine import ActEngine, subset_steps
+    from channels import (
+        CHANNEL_LEFT_LEG,
+        CHANNEL_RIGHT_LEG,
+        DEAD_MAN_MILLISECONDS,
+        ENQUEUE_MODE_REPLACE,
+        JSON_MODE,
+        JSON_OK,
+        JSON_QUEUED_MILLISECONDS,
+        JSON_STEPS,
+        SERVO_NEUTRAL_DEGREES,
+    )
+    from motion import BodyMotion
 except ImportError:
-    print("MISSING act_engine.py — motors disabled")
+    print("MISSING channels.py / act_engine.py / motion.py — motors disabled")
     while True:
         time.sleep(1)
 import PicoRobotics
 
-HOST = "growbot-relay.growbot.workers.dev"
-# Each board self-assigns a stable, unique pairing code from its hardware id, so two
-# robots never collide on the relay. To pin a custom code, set DEVID = "yourcode" instead.
-DEVID = "gb-" + binascii.hexlify(machine.unique_id()).decode()[-6:]
-PATH = "/d/" + DEVID
+RELAY_HOST = "growbot-relay.growbot.workers.dev"
+DEVICE_ID = "gb-" + binascii.hexlify(machine.unique_id()).decode()[-6:]
+RELAY_PATH = "/d/" + DEVICE_ID
 
 print("\n========================================")
-print("  PAIRING CODE:  " + DEVID)
+print("  PAIRING CODE:  " + DEVICE_ID)
 print("  Enter this code in the GrowBot app.")
 print("========================================\n")
 
 board = PicoRobotics.KitronikPicoRobotics()
-CHANNEL_PORT = getattr(PicoRobotics, "CHANNEL_PORT", {"l": 1, "r": 3})
-L_PORT, R_PORT = CHANNEL_PORT["l"], CHANNEL_PORT["r"]
-LEG_CHS, ARM_CHS = ("l", "r"), ("al", "ar")
-DEADMAN_MS = 500          # limp the WALK legs if no pose arrives for this long (matches the firmware)
-POLL_MS = 20              # main-loop cadence: ticks the act engine ~50Hz and polls for frames
+motion = BodyMotion(board, PicoRobotics.CHANNEL_PORT, time.ticks_ms, time.ticks_diff)
 
-NET_TIMEOUT_S = 6         # bound on every socket op; must stay well under WDT_MS
-PING_MS = 10000           # heartbeat cadence once the link has been quiet this long
-LINK_DEAD_MS = 25000      # quiet this long (= 2 unanswered pings) -> wedged, re-dial
-WIFI_RESET_EVERY = 3      # straight failures between radio power-cycles
-HARD_RESET_AFTER = 10     # straight failures before machine.reset() (~3-5 min of trying)
-WDT_MS = 8000             # hardware watchdog period (rp2 hardware caps near 8.3s)
+POLL_MILLISECONDS = 20
+NETWORK_TIMEOUT_SECONDS = 6
+PING_MILLISECONDS = 10000
+LINK_DEAD_MILLISECONDS = 25000
+WIFI_RESET_EVERY_FAILURES = 3
+HARD_RESET_AFTER_FAILURES = 10
+WATCHDOG_MILLISECONDS = 8000
+WIFI_JOIN_ATTEMPTS = 150
+WIFI_JOIN_POLL_MILLISECONDS = 100
+WATCHDOG_FEED_SLICE_MILLISECONDS = 200
+RADIO_BOUNCE_MILLISECONDS = 1000
+COLD_BOOT_SETTLE_MILLISECONDS = 2000
+HEALTHY_SESSION_MILLISECONDS = 30000
+REDIAL_BACKOFF_CAP_MILLISECONDS = 30000
+REDIAL_BACKOFF_BASE_MILLISECONDS = 1000
+TLS_PORT = 443
+
+RELAY_TYPE_FIELD = "t"
+RELAY_TYPE_POSE = "pose"
+RELAY_TYPE_ACT = "act"
+RELAY_TYPE_ROUTINE = "routine"
+RELAY_TYPE_STOP = "stop"
+RELAY_TYPE_HELLO = "hello"
+RELAY_TYPE_ACK = "ack"
+RELAY_POSE_CSV = "lr"
+RELAY_REQUEST_ID = "rid"
+RELAY_SEQUENCE = "seq"
+RELAY_TIMESTAMP = "ts"
+RELAY_ROUTINE_NAME = "name"
+RELAY_DEVICE_ID_FIELD = "id"
+DEFAULT_POSE_CSV = "90,90"
+
+LANE_POSE = "pose"
+LANE_ACT_LEGS = "act_legs"
+LANE_ACT_ARMS = "act_arms"
+LANE_STOP = "stop"
+
+JSON_OK_TRUE = 1
+JSON_OK_FALSE = 0
+WEBSOCKET_LENGTH_16BIT = 126
+WEBSOCKET_TEXT_FRAME_UNMASKED_BASE = 0x81
+WEBSOCKET_MASK_BIT = 0x80
+HTTP_SWITCHING_PROTOCOLS_TOKEN = b" 101 "
 
 wlan = network.WLAN(network.STA_IF)
-
-_wdt = None               # armed once in serve(); machine.WDT can NEVER be disarmed after
-                          # that, so every path below must keep the feed()s flowing
+hardware_watchdog = None
 
 def feed():
-    if _wdt:
-        _wdt.feed()
+    if hardware_watchdog:
+        hardware_watchdog.feed()
 
-def sleep_fed(ms):        # sleep that keeps the hardware watchdog fed
-    while ms > 0:
-        feed(); time.sleep_ms(min(ms, 200)); ms -= 200
+
+def sleep_fed(milliseconds):
+    while milliseconds > 0:
+        feed()
+        slice_ms = min(milliseconds, WATCHDOG_FEED_SLICE_MILLISECONDS)
+        time.sleep_ms(slice_ms)
+        milliseconds -= slice_ms
 
 def ensure_wifi():
     wlan.active(True)
@@ -85,22 +129,23 @@ def ensure_wifi():
             import secrets
             # field secrets.py (written by the build page + all existing robots) says WIFI_PASS;
             # newer secrets.example.py says WIFI_PASSWORD — accept both, or cold boots crash here.
-            _pw = getattr(secrets, 'WIFI_PASSWORD', None) or getattr(secrets, 'WIFI_PASS', '')
-            wlan.connect(secrets.WIFI_SSID, _pw)
-        except Exception as e:
-            print("wifi err", e)
-        for _ in range(150):                            # up to ~15s (cold-boot radio is slow)
+            wifi_password = getattr(secrets, "WIFI_PASSWORD", None) or getattr(secrets, "WIFI_PASS", "")
+            wlan.connect(secrets.WIFI_SSID, wifi_password)
+        except Exception as error:
+            print("wifi err", error)
+        for _attempt in range(WIFI_JOIN_ATTEMPTS):
             if wlan.isconnected():
                 break
-            feed(); time.sleep_ms(100)
-    ok = wlan.isconnected()
+            feed()
+            time.sleep_ms(WIFI_JOIN_POLL_MILLISECONDS)
+    joined = wlan.isconnected()
     # distinct one-line tokens the build-page flasher scans for, so "flashed OK" never masks "Wi-Fi didn't join"
-    if ok:
+    if joined:
         print("WIFI_OK", wlan.ifconfig()[0])
     else:
         print("WIFI_FAIL")
-    print("wifi:", ok, wlan.ifconfig()[0] if ok else "-")
-    return ok
+    print("wifi:", joined, wlan.ifconfig()[0] if joined else "-")
+    return joined
 
 def wifi_reset():
     # power the radio down and back up — recovers a brownout-wedged CYW43 that still
@@ -114,295 +159,310 @@ def wifi_reset():
         wlan.active(False)
     except Exception:
         pass
-    sleep_fed(1000)
+    sleep_fed(RADIO_BOUNCE_MILLISECONDS)
     wlan.active(True)
 
-def ws_open():
+def open_relay_socket():
     feed()
-    ai = socket.getaddrinfo(HOST, 443)[0][-1]
-    raw = socket.socket()
-    raw.settimeout(NET_TIMEOUT_S)   # lwIP timeout rides under the SSL layer too: every later
-    feed()                          # read/write errors out instead of blocking forever
+    address = socket.getaddrinfo(RELAY_HOST, TLS_PORT)[0][-1]
+    raw_socket = socket.socket()
+    raw_socket.settimeout(NETWORK_TIMEOUT_SECONDS)
+    feed()
     try:
-        raw.connect(ai)
+        raw_socket.connect(address)
         feed()
-        s = ssl.wrap_socket(raw, server_hostname=HOST)  # SNI required by Cloudflare
+        ssl_socket = ssl.wrap_socket(raw_socket, server_hostname=RELAY_HOST)
     except Exception:
-        raw.close()
+        raw_socket.close()
         raise
-    # keep `raw` so serve() can select.poll() it — MicroPython's SSLSocket has no .settimeout()
     key = binascii.b2a_base64(os.urandom(16)).strip().decode()
-    req = ("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
-           "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n") % (PATH, HOST, key)
-    s.write(req.encode())
-    resp = b""
-    while b"\r\n\r\n" not in resp:
+    request = ("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+               "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n") % (
+                   RELAY_PATH, RELAY_HOST, key)
+    ssl_socket.write(request.encode())
+    response = b""
+    while b"\r\n\r\n" not in response:
         feed()
-        c = s.read(1)
-        if not c:
+        chunk = ssl_socket.read(1)
+        if not chunk:
             break
-        resp += c
-    ok = b" 101 " in resp
-    print("handshake:", "OK" if ok else "FAIL", resp.split(b"\r\n")[0])
-    if not ok:
-        for x in (s, raw):
+        response += chunk
+    handshake_ok = HTTP_SWITCHING_PROTOCOLS_TOKEN in response
+    print("handshake:", "OK" if handshake_ok else "FAIL", response.split(b"\r\n")[0])
+    if not handshake_ok:
+        for sock in (ssl_socket, raw_socket):
             try:
-                x.close()
+                sock.close()
             except Exception:
                 pass
         return (None, None)
-    return (s, raw)
+    return (ssl_socket, raw_socket)
 
-def send_text(s, txt):
-    p = txt.encode()
-    n = len(p)
+
+def send_text(ssl_socket, text):
+    payload = text.encode()
+    length = len(payload)
     mask = os.urandom(4)
-    if n < 126:
-        hdr = bytes([0x81, 0x80 | n])
+    if length < WEBSOCKET_LENGTH_16BIT:
+        header = bytes([WEBSOCKET_TEXT_FRAME_UNMASKED_BASE, WEBSOCKET_MASK_BIT | length])
     else:
-        hdr = bytes([0x81, 0x80 | 126, (n >> 8) & 0xFF, n & 0xFF])
-    mp = bytearray(n)
-    for i in range(n):
-        mp[i] = p[i] ^ mask[i & 3]
-    s.write(hdr + mask + bytes(mp))
+        header = bytes([
+            WEBSOCKET_TEXT_FRAME_UNMASKED_BASE,
+            WEBSOCKET_MASK_BIT | WEBSOCKET_LENGTH_16BIT,
+            (length >> 8) & 0xFF,
+            length & 0xFF,
+        ])
+    masked_payload = bytearray(length)
+    for index in range(length):
+        masked_payload[index] = payload[index] ^ mask[index & 3]
+    ssl_socket.write(header + mask + bytes(masked_payload))
 
-def recvn(s, n):
-    b = b""
-    while len(b) < n:
+
+def recv_exact(ssl_socket, count):
+    buffer = b""
+    while len(buffer) < count:
         feed()
-        c = s.read(n - len(b))
-        if not c:
+        chunk = ssl_socket.read(count - len(buffer))
+        if not chunk:
             return None
-        b += c
-    return b
+        buffer += chunk
+    return buffer
 
-def _frame_after(s, b0):                # read the rest of a frame given its already-read first byte (blocking)
-    b1 = recvn(s, 1)
-    if not b1:
+
+def read_frame_after_first_byte(ssl_socket, first_byte):
+    second_byte = recv_exact(ssl_socket, 1)
+    if not second_byte:
         return (None, None)
-    op = b0[0] & 0x0F
-    ln = b1[0] & 0x7F
-    if ln == 126:
-        e = recvn(s, 2); ln = (e[0] << 8) | e[1]
-    elif ln == 127:
-        e = recvn(s, 8); ln = 0
-        for b in e:
-            ln = (ln << 8) | b
-    masked = b1[0] & 0x80
-    mask = recvn(s, 4) if masked else None
-    pl = recvn(s, ln) if ln else b""
-    if masked and pl:
-        pl = bytes(pl[i] ^ mask[i & 3] for i in range(ln))
-    return (op, pl)
+    opcode = first_byte[0] & 0x0F
+    length = second_byte[0] & 0x7F
+    if length == WEBSOCKET_LENGTH_16BIT:
+        extra = recv_exact(ssl_socket, 2)
+        length = (extra[0] << 8) | extra[1]
+    elif length == 127:
+        extra = recv_exact(ssl_socket, 8)
+        length = 0
+        for byte in extra:
+            length = (length << 8) | byte
+    masked = second_byte[0] & WEBSOCKET_MASK_BIT
+    mask = recv_exact(ssl_socket, 4) if masked else None
+    payload = recv_exact(ssl_socket, length) if length else b""
+    if masked and payload:
+        payload = bytes(payload[index] ^ mask[index & 3] for index in range(length))
+    return (opcode, payload)
 
-# ---- motor lanes ----
-def _write_chs(pose):
-    for ch, deg in pose.items():
-        p = CHANNEL_PORT.get(ch)
-        if p is not None:
-            board.servoWrite(p, deg)
 
-def _release_chs(chs):
-    for ch in chs:
-        p = CHANNEL_PORT.get(ch)
-        if p is not None:
-            board.release(p)
+def send_ack(ssl_socket, message, succeeded, queued_milliseconds):
+    send_text(ssl_socket, json.dumps({
+        RELAY_TYPE_FIELD: RELAY_TYPE_ACK,
+        RELAY_REQUEST_ID: message.get(RELAY_REQUEST_ID),
+        JSON_OK: JSON_OK_TRUE if succeeded else JSON_OK_FALSE,
+        JSON_QUEUED_MILLISECONDS: queued_milliseconds,
+    }))
 
-def apply_pose(l, r):                   # WALK lane: legs only, latest-wins
-    board.servoWrite(L_PORT, int(max(0, min(180, l))))
-    board.servoWrite(R_PORT, int(max(0, min(180, r))))
 
-def _enqueue_act(steps, mode):
-    mode = "append" if mode == "append" else "replace"
-    if not isinstance(steps, list):
-        return False, 0, False
-    legs = subset_steps(steps, LEG_CHS)
-    arms = subset_steps(steps, ARM_CHS)
-    if not legs and not arms:
-        return False, 0, False
-    q = 0
-    if legs:
-        ok, q = eng_legs.enqueue(legs, mode)
-        if not ok:
-            return False, q, True
-    if arms:
-        ok, qa = eng_arms.enqueue(arms, mode)
-        q = max(q, qa if ok else q)
-        if not ok:
-            return False, q, bool(legs)
-    return True, max(eng_legs.queued_ms(), eng_arms.queued_ms()), bool(legs)
-
-eng_legs = ActEngine(_write_chs, lambda: _release_chs(LEG_CHS),
-                     time.ticks_ms, time.ticks_diff, channels=LEG_CHS)
-eng_arms = ActEngine(_write_chs, lambda: _release_chs(ARM_CHS),
-                     time.ticks_ms, time.ticks_diff, channels=ARM_CHS)
-ROUTINES = {"wiggle": [{"l": 60, "r": 120, "ms": 400}, {"l": 120, "r": 60, "ms": 400},
-                       {"l": 60, "r": 120, "ms": 400}, {"l": 120, "r": 60, "ms": 400},
-                       {"l": 90, "r": 90, "ms": 300}]}
-
-def _handle(s, pl):
+def handle_relay_message(ssl_socket, payload):
     """Dispatch one text frame. Returns the lane kind so serve() can manage the dead-man."""
     try:
-        m = json.loads(pl)
+        message = json.loads(payload)
     except Exception:
         return None
-    t = m.get("t")
-    if t == "pose":
-        eng_legs.clear()                                # walk owns legs only; arms keep gliding
+    message_type = message.get(RELAY_TYPE_FIELD)
+    if message_type == RELAY_TYPE_POSE:
+        motion.clear_legs()
         try:
-            parts = m.get("lr", "90,90").split(",")
-            apply_pose(float(parts[0]), float(parts[1]))
+            parts = message.get(RELAY_POSE_CSV, DEFAULT_POSE_CSV).split(",")
+            motion.apply_absolute_pose(float(parts[0]), float(parts[1]))
         except Exception:
             pass
-        if "seq" in m:                                  # latency-probe echo (tools only)
-            send_text(s, json.dumps({"t": "ack", "seq": m["seq"], "ts": m.get("ts", 0)}))
-        return "pose"
-    if t == "act":
-        ok, q, used_legs = _enqueue_act(m.get("steps", []), m.get("mode", "replace"))
-        send_text(s, json.dumps({"t": "ack", "rid": m.get("rid"), "ok": 1 if ok else 0,
-                                 "queued_ms": (q if ok else 0)}))
-        return "act_legs" if used_legs else "act_arms"
-    if t == "routine":
-        ok, q, used_legs = _enqueue_act(ROUTINES.get(m.get("name", ""), []), "replace")
-        send_text(s, json.dumps({"t": "ack", "rid": m.get("rid"), "ok": 1 if ok else 0,
-                                 "queued_ms": (q if ok else 0)}))
-        return "act_legs" if used_legs else "act_arms"
-    if t == "stop":
-        eng_legs.clear(); eng_arms.clear()
-        _release_chs(tuple(CHANNEL_PORT.keys()))
-        send_text(s, json.dumps({"t": "ack", "rid": m.get("rid"), "ok": 1, "queued_ms": 0}))
-        return "stop"
+        if RELAY_SEQUENCE in message:
+            send_text(ssl_socket, json.dumps({
+                RELAY_TYPE_FIELD: RELAY_TYPE_ACK,
+                RELAY_SEQUENCE: message[RELAY_SEQUENCE],
+                RELAY_TIMESTAMP: message.get(RELAY_TIMESTAMP, 0),
+            }))
+        return LANE_POSE
+    if message_type == RELAY_TYPE_ACT:
+        succeeded, queued, used_legs = motion.enqueue_wire_steps(
+            message.get(JSON_STEPS, []), message.get(JSON_MODE, ENQUEUE_MODE_REPLACE))
+        send_ack(ssl_socket, message, succeeded, queued if succeeded else 0)
+        return LANE_ACT_LEGS if used_legs else LANE_ACT_ARMS
+    if message_type == RELAY_TYPE_ROUTINE:
+        succeeded, queued, used_legs = motion.enqueue_routine(message.get(RELAY_ROUTINE_NAME, ""))
+        send_ack(ssl_socket, message, succeeded, queued if succeeded else 0)
+        return LANE_ACT_LEGS if used_legs else LANE_ACT_ARMS
+    if message_type == RELAY_TYPE_STOP:
+        motion.clear_both()
+        motion.release_all_mapped_ports()
+        send_ack(ssl_socket, message, True, 0)
+        return LANE_STOP
     return None
 
-def serve(s, raw):
-    global _wdt
-    poll = select.poll(); poll.register(raw, select.POLLIN)   # poll the RAW fd; SSL reads stay blocking
-    send_text(s, json.dumps({"t": "hello", "id": DEVID}))
-    print("hello sent; walk + gesture lanes ready (dead-man %dms)" % DEADMAN_MS)
-    if _wdt is None:
-        _wdt = machine.WDT(timeout=WDT_MS)              # last-resort self-heal: reboots a truly frozen
-        print("hw watchdog armed (%dms)" % WDT_MS)      # chip; from here on every path must feed()
-    eng_legs.clear()
-    eng_arms.clear()
+
+WEBSOCKET_OPCODE_CLOSE = 0x8
+WEBSOCKET_OPCODE_PING = 0x9
+WEBSOCKET_OPCODE_TEXT = 0x1
+WEBSOCKET_CLIENT_PONG = bytes([0x8A, WEBSOCKET_MASK_BIT])
+WEBSOCKET_CLIENT_PING = bytes([0x89, WEBSOCKET_MASK_BIT])
+POSE_RATE_LOG_MILLISECONDS = 1000
+
+
+def serve(ssl_socket, raw_socket):
+    global hardware_watchdog
+    poll = select.poll()
+    poll.register(raw_socket, select.POLLIN)
+    send_text(ssl_socket, json.dumps({
+        RELAY_TYPE_FIELD: RELAY_TYPE_HELLO,
+        RELAY_DEVICE_ID_FIELD: DEVICE_ID,
+    }))
+    print("hello sent; walk + gesture lanes ready (dead-man %dms)" % DEAD_MAN_MILLISECONDS)
+    if hardware_watchdog is None:
+        hardware_watchdog = machine.WDT(timeout=WATCHDOG_MILLISECONDS)
+        print("hw watchdog armed (%dms)" % WATCHDOG_MILLISECONDS)
+    motion.clear_both()
     walk_on = False
     now = time.ticks_ms()
-    last_pose = now; last_rx = now; last_ping = now
-    n = 0; nlast = 0; last = now
+    last_pose_at = now
+    last_received_at = now
+    last_ping_at = now
+    pose_count = 0
+    pose_count_at_last_log = 0
+    last_rate_log_at = now
     while True:
         feed()
-        # wait up to POLL_MS for a frame to START (so the act engine keeps ticking between frames).
-        # MicroPython's SSLSocket has NO .settimeout(); poll the RAW fd for readability instead and keep
-        # every SSL read blocking — once poll says readable, the bytes are already here so reads return at once.
-        b0 = None
+        first_byte = None
         try:
-            if poll.poll(POLL_MS):
-                b0 = s.read(1)
-        except OSError as e:                            # a real socket/ssl error → drop & let main() re-dial
-            print("read err:", e); return
-        if b0 == b"":                                   # empty read = relay closed the socket
-            print("conn closed by relay"); return
-        if b0:
-            op, pl = _frame_after(s, b0)                # rest of the frame: blocking (s is always blocking now)
-            if op is None or op == 0x8:
-                print("conn closed by relay"); return
-            last_rx = time.ticks_ms()                   # any frame (incl. pongs) proves the link is alive
-            if op == 0x9:                               # ping -> pong
-                s.write(bytes([0x8A, 0x80]) + os.urandom(4))
-            elif op == 0x1:
-                kind = _handle(s, pl)
-                if kind == "pose":
-                    walk_on = True; last_pose = time.ticks_ms()
-                    n += 1
+            if poll.poll(POLL_MILLISECONDS):
+                first_byte = ssl_socket.read(1)
+        except OSError as error:
+            print("read err:", error)
+            return
+        if first_byte == b"":
+            print("conn closed by relay")
+            return
+        if first_byte:
+            opcode, payload = read_frame_after_first_byte(ssl_socket, first_byte)
+            if opcode is None or opcode == WEBSOCKET_OPCODE_CLOSE:
+                print("conn closed by relay")
+                return
+            last_received_at = time.ticks_ms()
+            if opcode == WEBSOCKET_OPCODE_PING:
+                ssl_socket.write(WEBSOCKET_CLIENT_PONG + os.urandom(4))
+            elif opcode == WEBSOCKET_OPCODE_TEXT:
+                lane = handle_relay_message(ssl_socket, payload)
+                if lane == LANE_POSE:
+                    walk_on = True
+                    last_pose_at = time.ticks_ms()
+                    pose_count += 1
                     now = time.ticks_ms()
-                    if time.ticks_diff(now, last) >= 1000:
-                        print("poses", n, "rate", n - nlast, "Hz"); nlast = n; last = now
-                elif kind in ("act_legs", "stop"):
-                    walk_on = False                     # a legs gesture takes the walk lane
-                # act_arms: leave walk_on so a wave can run while walking
+                    if time.ticks_diff(now, last_rate_log_at) >= POSE_RATE_LOG_MILLISECONDS:
+                        print("poses", pose_count, "rate", pose_count - pose_count_at_last_log, "Hz")
+                        pose_count_at_last_log = pose_count
+                        last_rate_log_at = now
+                elif lane in (LANE_ACT_LEGS, LANE_STOP):
+                    walk_on = False
         else:
-            # quiet tick: watch the LINK (the dead-man below guards the LEGS; this guards the SOCKET).
-            # a brownout can drop WiFi with no FIN/RST — without this, serve() would spin forever deaf.
             now = time.ticks_ms()
             if not wlan.isconnected():
-                print("wifi dropped"); return
-            if time.ticks_diff(now, last_rx) > LINK_DEAD_MS:
-                print("link dead: nothing heard for %ds, re-dialing" % (LINK_DEAD_MS // 1000)); return
-            if time.ticks_diff(now, last_rx) > PING_MS and time.ticks_diff(now, last_ping) > PING_MS:
-                s.write(bytes([0x89, 0x80]) + os.urandom(4))    # ping; the pong refreshes last_rx
-                last_ping = now
-        eng_legs.tick()
-        eng_arms.tick()
-        if walk_on and not eng_legs.active and time.ticks_diff(time.ticks_ms(), last_pose) > DEADMAN_MS:
-            _release_chs(LEG_CHS); walk_on = False      # WALK dead-man: legs only
+                print("wifi dropped")
+                return
+            if time.ticks_diff(now, last_received_at) > LINK_DEAD_MILLISECONDS:
+                print("link dead: nothing heard for %ds, re-dialing" % (LINK_DEAD_MILLISECONDS // 1000))
+                return
+            if (time.ticks_diff(now, last_received_at) > PING_MILLISECONDS
+                    and time.ticks_diff(now, last_ping_at) > PING_MILLISECONDS):
+                ssl_socket.write(WEBSOCKET_CLIENT_PING + os.urandom(4))
+                last_ping_at = now
+        motion.tick()
+        if (walk_on and not motion.legs_engine.active
+                and time.ticks_diff(time.ticks_ms(), last_pose_at) > DEAD_MAN_MILLISECONDS):
+            motion.quick_release_legs()
+            walk_on = False
             print("dead-man: walk limp (silence)")
 
+
 def main():
-    sleep_fed(2000)                                     # let the WiFi radio settle on cold boot
-    fails = 0
-    while True:                                         # never give up: re-ensure wifi, re-dial the relay
-        s = raw = None
-        t0 = time.ticks_ms()
+    sleep_fed(COLD_BOOT_SETTLE_MILLISECONDS)
+    failures = 0
+    while True:
+        ssl_socket = raw_socket = None
+        session_started_at = time.ticks_ms()
         try:
             if ensure_wifi():
-                s, raw = ws_open()
-                if s:
-                    serve(s, raw)                       # only returns when the link died
-                    if time.ticks_diff(time.ticks_ms(), t0) > 30000:
-                        fails = 0                       # a session that lived a while = healthy link
-        except Exception as e:
-            print("loop err:", e)
-        for x in (s, raw):                              # re-dialing is routine now — never leak sockets
+                ssl_socket, raw_socket = open_relay_socket()
+                if ssl_socket:
+                    serve(ssl_socket, raw_socket)
+                    if time.ticks_diff(time.ticks_ms(), session_started_at) > HEALTHY_SESSION_MILLISECONDS:
+                        failures = 0
+        except Exception as error:
+            print("loop err:", error)
+        for sock in (ssl_socket, raw_socket):
             try:
-                if x:
-                    x.close()
+                if sock:
+                    sock.close()
             except Exception:
                 pass
-        eng_legs.clear()
-        eng_arms.clear()
+        motion.clear_both()
         try:
-            _release_chs(tuple(CHANNEL_PORT.keys()))    # offline = limp all mapped ports
+            motion.release_all_mapped_ports()
         except Exception:
             pass
-        fails += 1
-        if fails >= HARD_RESET_AFTER:
-            print("self-heal: machine.reset()")         # = the power cycle users did by hand
-            sleep_fed(200)
+        failures += 1
+        if failures >= HARD_RESET_AFTER_FAILURES:
+            print("self-heal: machine.reset()")
+            sleep_fed(WATCHDOG_FEED_SLICE_MILLISECONDS)
             machine.reset()
-        if fails % WIFI_RESET_EVERY == 0:
+        if failures % WIFI_RESET_EVERY_FAILURES == 0:
             try:
                 wifi_reset()
-            except Exception as e:
-                print("wifi reset err:", e)
-        wait = min(30000, 1000 << min(fails, 5))        # backoff 2s,4s,8s,16s,30s cap
-        print("re-dial in %ds (fail %d)" % (wait // 1000, fails))
+            except Exception as error:
+                print("wifi reset err:", error)
+        wait = min(
+            REDIAL_BACKOFF_CAP_MILLISECONDS,
+            REDIAL_BACKOFF_BASE_MILLISECONDS << min(failures, 5),
+        )
+        print("re-dial in %ds (fail %d)" % (wait // 1000, failures))
         sleep_fed(wait)
 
-def boot_calibration():
-    # One-firmware build aid: a quick leg-check that ENDS with both legs at 90 (straight),
-    # so on a first build you can glue the legs on straight. Confirms both legs move + the
-    # L/R mapping, then leaves them at 90. Runs once on boot, before we dial the relay
-    # (~8s; harmless on an already-built robot — it just stretches on power-up).
-    board.servoWrite(L_PORT, 90); board.servoWrite(R_PORT, 90); sleep_fed(500)           # center
-    for _ in range(2):                                                                   # RIGHT leg only
-        board.servoWrite(R_PORT, 60); sleep_fed(220); board.servoWrite(R_PORT, 120); sleep_fed(220)
-    board.servoWrite(R_PORT, 90)
-    for _ in range(2):                                                                   # LEFT leg only
-        board.servoWrite(L_PORT, 60); sleep_fed(220); board.servoWrite(L_PORT, 120); sleep_fed(220)
-    board.servoWrite(L_PORT, 90)
-    for _ in range(2):                                                                   # BOTH at once
-        board.servoWrite(L_PORT, 55); board.servoWrite(R_PORT, 55); sleep_fed(260)
-        board.servoWrite(L_PORT, 125); board.servoWrite(R_PORT, 125); sleep_fed(260)
-    board.servoWrite(L_PORT, 90); board.servoWrite(R_PORT, 90); sleep_fed(2000)          # show straight (2s glue window on a first build)
-    board.release(L_PORT); board.release(R_PORT)                                          # then LIMP — no held torque = no idle battery drain while it dials the relay
 
-def _cold_boot():
-    # machine.reset() and the hardware watchdog BOTH report WDT_RESET on rp2, so this
-    # skips the calibration stretch on self-heal reboots and keeps it for real power-ups.
+def boot_calibration():
+    left_port = motion.port_for(CHANNEL_LEFT_LEG)
+    right_port = motion.port_for(CHANNEL_RIGHT_LEG)
+    board.servoWrite(left_port, SERVO_NEUTRAL_DEGREES)
+    board.servoWrite(right_port, SERVO_NEUTRAL_DEGREES)
+    sleep_fed(500)
+    for _wave in range(2):
+        board.servoWrite(right_port, 60)
+        sleep_fed(220)
+        board.servoWrite(right_port, 120)
+        sleep_fed(220)
+    board.servoWrite(right_port, SERVO_NEUTRAL_DEGREES)
+    for _wave in range(2):
+        board.servoWrite(left_port, 60)
+        sleep_fed(220)
+        board.servoWrite(left_port, 120)
+        sleep_fed(220)
+    board.servoWrite(left_port, SERVO_NEUTRAL_DEGREES)
+    for _wave in range(2):
+        board.servoWrite(left_port, 55)
+        board.servoWrite(right_port, 55)
+        sleep_fed(260)
+        board.servoWrite(left_port, 125)
+        board.servoWrite(right_port, 125)
+        sleep_fed(260)
+    board.servoWrite(left_port, SERVO_NEUTRAL_DEGREES)
+    board.servoWrite(right_port, SERVO_NEUTRAL_DEGREES)
+    sleep_fed(2000)
+    board.release(left_port)
+    board.release(right_port)
+
+
+def is_cold_boot():
     try:
         return machine.reset_cause() != machine.WDT_RESET
     except Exception:
         return True
 
-if _cold_boot():
+
+if is_cold_boot():
     boot_calibration()
 main()

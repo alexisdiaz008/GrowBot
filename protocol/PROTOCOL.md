@@ -5,7 +5,7 @@ How the phone (the brain) talks to a microcontroller (the body). The app is
 that joins Wi-Fi and answers these endpoints works. **The Pico 2 W is the reference
 board**; its firmware is the canonical implementation.
 
-- **Reference firmware:** [`robot-server.py`](robot-server.py) (HTTP + WebSocket server) + [`act_engine.py`](act_engine.py) (the 50 Hz keyframe glide engine). Flash `robot-server.py` as `main.py`.
+- **Reference firmware:** [`robot-server.py`](../firmware/robot-server.py) (HTTP adapter) + [`motion.py`](../firmware/motion.py) + [`act_engine.py`](../firmware/act_engine.py) (the 50 Hz keyframe glide engines) + [`channels.py`](../firmware/channels.py) (channel ids vs wire aliases). Flash `robot-server.py` as `main.py`.
 - **Reference brain:** the `bodyDo()` / walk-lane code in [`vercel-app/v2/index.html`](vercel-app/v2/index.html).
 - **Conformance test:** open [`conformance.html`](conformance.html), point it at your board, get PASS/FAIL per message.
 
