@@ -9,3 +9,5 @@ The current print set, same files served at [growbot.dev/build](https://growbot.
 Plain PLA, no supports. Legs screw onto the servo horns, no glue.
 
 No printer? Use the [cutout template](../cutout-template.html) at 100% on paper and build from any stiff material.
+
+First arms: reprint `growbot_diy_leg_v1_r01.stl` as paddles. Mount mid-body, shafts out, same mirror rule as legs (`al + ar = 180`). See [`docs/spec-rails.md`](../../docs/spec-rails.md).

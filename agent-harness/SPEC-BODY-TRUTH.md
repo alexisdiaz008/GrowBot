@@ -64,7 +64,7 @@ Rejection vs clamping: an **off-menu verb or malformed call is rejected whole an
 - **atomic** — deterministic primitives: `say(text)`, `sing(notes)`, `gesture(steps)`, `lift_leg(which, amount)`. The actuator executes them directly.
 - **policy** — learned skills exposed as verbs with knobs: `walk(secs)`, `turn(gain)`. A trained controller (e.g. an evolved/RL walk policy running at 30 Hz against the IMU) owns the *how*; the agent only decides *that* and *how much*.
 
-**They are the same shape to the agent** — it cannot tell them apart, and must not need to. Sequential composition is free (`walk` then `gesture`). Concurrent blending — two verbs writing one actuator at once — is explicitly out of scope; don't design for it until you need it.
+**They are the same shape to the agent** — it cannot tell them apart, and must not need to. Sequential composition is free (`walk` then `gesture`). Concurrent verbs in one tick are allowed only when their **used channel sets are disjoint** (`walk` + arms-only `gesture`, or `walk` + `arms`). Two writers on the same channel in one tick are rejected.
 
 ## 5. The actuator contract
 
@@ -105,4 +105,4 @@ Safety machinery that is **engine-owned and never appears as verbs** (the agent 
 
 ## 7. The worked example
 
-[`body_truth.phone.json`](body_truth.phone.json) is the bare-phone body: four atomic, motionless verbs (`say`, `sound`, `sing`, `burst`), a movement guide that frames sound and light *as* the creature's gesture space, few-shot `sing` examples, and no channel table. It is deliberately the smallest real body file — and it is the body the shipped product runs for most users. A verb menu for the 2-leg walker body appears in [VERBS.md](VERBS.md) §2 as a reference extension.
+[`body_truth.phone.json`](body_truth.phone.json) is the bare-phone body. Motor bodies: [`body_truth.walker.json`](body_truth.walker.json) (2-leg) and [`body_truth.walker4.json`](body_truth.walker4.json) (legs + arms). Pins are not in these files; see [`docs/spec-rails.md`](../docs/spec-rails.md).

@@ -15,6 +15,8 @@ Each servo has 3 wires: signal (orange) · power (red) · ground (brown).
 
 Both reds go to battery **+**. Then tie ALL the grounds together: battery **−**, a Pico **GND** pin, and both servo browns. One shared ground rail. That is the whole wiring.
 
+Optional arms (same 180° servos): left arm signal **GP2**, right arm **GP3**, reds and grounds on the same rails. Firmware accepts `/act` keys `al`/`ar` without changing the 2-leg walk stream. See [`docs/spec-rails.md`](docs/spec-rails.md).
+
 > Powering from USB while testing on a desk is fine for gentle moves, but real walking needs the battery pack. The servos spike harder than USB can supply.
 
 ## 2. Put the firmware on the Pico

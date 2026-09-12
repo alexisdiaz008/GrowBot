@@ -70,10 +70,10 @@ order: `wifi.json` → `secrets.py` → setup AP.)
 
 | Endpoint | Method | Body / query | Returns | Meaning |
 |---|---|---|---|---|
-| `/act` | POST | `{"steps":[{"l":0-180,"r":0-180,"ms":N}], "mode":"replace"\|"append"}` | `{"ok":1,"queued_ms":N}` · `409 {"err":"queue full","queued_ms":N}` · `400 {"err":...}` | **Path A.** Keyframe plan; chip glides between poses. `l`/`r` = absolute degrees (90 = neutral). `ms` = glide time to that pose (0 = snap). Omit `l` or `r` to hold that leg; repeat a pose to dwell. `replace` (default) takes over mid-glide; `append` pipelines. |
-| `/ws` | WebSocket | text frames `"<l>,<r>"` e.g. `"70,110"` | (no per-frame reply) | **Path B.** Persistent pose stream, **latest-wins**. Phone sends ~30 Hz. Stop sending → 500 ms dead-man → legs limp. |
+| `/act` | POST | `{"steps":[{"l":0-180,"r":0-180,"al":0-180,"ar":0-180,"ms":N}], "mode":"replace"\|"append"}` | `{"ok":1,"queued_ms":N}` · `409 {"err":"queue full","queued_ms":N}` · `400 {"err":...}` | **Path A.** Keyframe plan; chip glides between poses. `l`/`r` = legs, optional `al`/`ar` = arms (absolute degrees, 90 = neutral). Omit a key to hold that channel. An arms-only plan does **not** cancel walk. Never send a 4-value CSV on `/ws`. |
+| `/ws` | WebSocket | text frames `"<l>,<r>"` e.g. `"70,110"` | (no per-frame reply) | **Path B.** Persistent **leg** pose stream, **latest-wins**. Two numbers only. Phone sends ~30 Hz. Stop sending → 500 ms dead-man → legs limp. Does not clear an arms glide. |
 | `/stop` | GET | — | `stopped` | Instant: clear the queue + go limp. Brain treats this as a hard latch. |
-| `/pose` | GET | `?l=<0-180>&r=<0-180>` | `ok` | One absolute pose now. 500 ms dead-man. |
+| `/pose` | GET | `?l=<0-180>&r=<0-180>` optional `&al=&ar=` | `ok` | One absolute pose now. Missing pair = do not touch that engine. Leg writes use the 500 ms dead-man. |
 | `/set` | GET | `?l=<-1..1>&r=<-1..1>` | `ok` | **Legacy** speed/lean (mapped to `90 - s*35`). 500 ms dead-man. |
 | `/seq` | POST | `{"steps":[{"l":-1..1,"r":-1..1,"ms":N}]}` | `queued <N>ms (<k> steps)` · `409` | **Legacy** speed dialect → keyframes, non-blocking. |
 | `/routine` | GET | `?name=wiggle\|dance\|shimmy\|march\|bow\|stretch` | `routine <name> queued (<N>ms)` · `404` | Canned keyframe gestures (great for demos/conformance). |
@@ -96,9 +96,10 @@ There is **no streaming telemetry channel**. Replies are per-request:
   ```json
   {"set_n":N,"deadman":N,"ws_rx":N,"moving":bool,
    "act":{"active":bool,"queued_ms":N},
+   "channels":["l","r","al","ar"],
    "up_s":N,"dt_ms":{"n":N,"min":N,"p50":N,"p90":N,"p99":N,"max":N}}
   ```
-  `act.active`/`queued_ms` = is a glide playing and how much motion is queued. `ws_rx` =
+  `act.active`/`queued_ms` = is a glide playing (legs or arms) and how much motion is queued. `channels` lists loaded wire keys (older chips omit it). `ws_rx` =
   WebSocket poses received. `dt_ms` = arrival-interval percentiles for `/set`+`/pose`.
 
 ---
@@ -122,8 +123,8 @@ reference firmware:
    ~300 ms, then releasing.
 5. **Release means limp.** "Stop"/idle = cut the servo signal so the servo is limp (cool,
    quiet, low current) — not actively holding torque.
-6. **Manual control wins.** A `/set`/`/pose`/`/ws` command clears any queued `/act` plan.
-7. **`/stop` is instant + hard.** Clear the queue and go limp immediately, even mid-glide.
+6. **Manual control wins on the channels it names.** `/set`/`/pose`/`/ws` clear the **legs** engine. They must not clear an arms-only `/act`. `/ws` is two numbers only.
+7. **`/stop` is instant + hard.** Clear both engines and go limp immediately, even mid-glide.
 8. **Don't run away on disconnect.** Lost link / drained queue / closed WebSocket = limp,
    not "keep doing the last thing." Add your own stall/thermal bound — the phone's 20 s/60 s
    duty budget is advisory and **not** enforced on the chip.
@@ -149,6 +150,10 @@ watch the legs while it runs.
 - `GET /routine?name=wiggle` → `200 … queued`.
 - WebSocket `/ws` connects; sending `"70,110"` then `"90,90"` moves the legs, and stopping
   the stream limps them within ~500 ms.
+
+**Optional 4-servo block** (skip if the body has no arms):
+- `POST /act {"steps":[{"al":50,"ar":130,"ms":400}]}` → `200 {ok:1,...}` and **legs stay put**.
+- Then `GET /stop` → both pairs limp.
 
 If `/act` + `/stop` pass and the legs move, you're in. Everything else is polish.
 

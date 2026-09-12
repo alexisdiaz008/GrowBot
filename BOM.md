@@ -9,7 +9,7 @@ Looking for the original V0 build (Pi Zero, from-scratch learning)? It is preser
 | # | Part | Spec | Qty | ~USD | Where / notes |
 |---|------|------|----:|----:|----------------|
 | 1 | Raspberry Pi Pico 2 W | RP2350, WiFi | 1 | $7 | official resellers, Adafruit, AliExpress. The W matters, it is the WiFi that talks to your phone. Pico hard to get or pricey where you are? An ESP32 works too, see below |
-| 2 | MG90S micro servo | metal gear, 9 g | 2 | $8 / pair | AliExpress, Amazon. SG90s work too but are weaker (plastic gears) |
+| 2 | MG90S micro servo | metal gear, 9 g | 2 | $8 / pair | AliExpress, Amazon. SG90s work too but are weaker (plastic gears). Optional **+2** of the same for arms (GP2 / GP3); four servos can brown out USB — use the battery pack |
 | 3 | Mini breadboard + dupont jumpers | | 1 set | $5 | the direct-wire way. Or a Pico carrier board (~$13) if you want screw terminals |
 | 4 | 4× AA lithium batteries | 1.5 V single-use (Energizer Ultimate type) | 4 | $15 | ⚠️ exactly these for strong legs. NOT USB-rechargeable 1.5 V AAs (they cut out under load) and NEVER 3.7 V 14500 cells (they will destroy the board). Plain alkaline AAs are fine to start, just heavier and weaker |
 | 5 | 4×AA holder with switch | | 1 | $3 | the switch is your power button |

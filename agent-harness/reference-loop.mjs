@@ -45,10 +45,15 @@ if (!MOCK && !LOCAL && !KEY) {
 
 /* ── fixed regions: constitution (swappable persona) + SAFETY FLOOR (engine-owned, ALWAYS appended last,
       never editable by a loaded persona) + the dream prompt (the sole identity writer). ── */
+const BODY_NAME = (() => {
+  const i = argv.indexOf("--body");
+  if (i >= 0) return argv[i + 1];
+  return process.env.BODY || "body_truth.phone.json";
+})();
 const CONSTITUTION = readFileSync(join(HERE, "prompts/constitution.txt"), "utf8").trim();
 const SAFETY_FLOOR = readFileSync(join(HERE, "prompts/safety-floor.txt"), "utf8").trim();
 const DREAM_SYS = readFileSync(join(HERE, "prompts/dream.txt"), "utf8").trim();
-const BODY = JSON.parse(readFileSync(join(HERE, "body_truth.phone.json"), "utf8"));
+const BODY = JSON.parse(readFileSync(join(HERE, BODY_NAME), "utf8"));
 
 /* ── memory: ONE blob, regions with different writers (SPEC-MEMORY.md has the permission table). ── */
 const MEM_PATH = join(HERE, "memory.json");
@@ -80,7 +85,7 @@ function validateVerb(call, body) {
   const spec = body.verbs.find(x => x.v === call.v);
   if (!spec) return { ok: false, why: `off-menu verb '${call.v}'` };
   const out = {};
-  for (const [name, s] of Object.entries(spec.args)) {
+  for (const [name, s] of Object.entries(spec.args || {})) {
     let val = call.args ? call.args[name] : undefined;
     if (s.type === "string") {
       if (typeof val !== "string" || !val.trim()) return { ok: false, why: `${call.v}.${name} must be a non-empty string` };
@@ -92,27 +97,48 @@ function validateVerb(call, body) {
       val = clamp(val, s.min ?? -Infinity, s.max ?? Infinity);
     } else if (s.type === "array") {
       if (!Array.isArray(val) || !val.length) return { ok: false, why: `${call.v}.${name} must be a non-empty array` };
+      const optional = new Set(s.optional || []);
       val = val.slice(0, s.max_items ?? val.length).map(item => {
         const o = {};
         for (const [f, range] of Object.entries(s.items)) {
-          const n = Number(item?.[f]);
+          if (item?.[f] === undefined || item[f] === null) {
+            if (optional.has(f)) continue;
+            return null;
+          }
+          const n = Number(item[f]);
           if (!isFinite(n)) return null;
-          o[f] = clamp(n, range[0], range[1]);        // hard limits live in code, not in the prompt
+          o[f] = clamp(n, range[0], range[1]);
         }
+        if (optional.size && !Object.keys(o).some(k => k !== "ms")) return null;
         return o;
       });
       if (val.some(x => x === null)) return { ok: false, why: `${call.v}.${name} has a malformed item` };
     }
     out[name] = val;
   }
-  return { ok: true, v: spec.v, motion: !!spec.motion, args: out };
+  return { ok: true, v: spec.v, motion: !!spec.motion, args: out, spec };
+}
+
+const WIRE_KEYS = { l: "leg_l", r: "leg_r", al: "arm_l", ar: "arm_r" };
+function usedChannels(v) {
+  if (v.v === "gesture" && Array.isArray(v.args.steps)) {
+    const used = new Set();
+    for (const st of v.args.steps) {
+      for (const k of Object.keys(st)) {
+        if (k === "ms") continue;
+        used.add(WIRE_KEYS[k] || k);
+      }
+    }
+    return [...used];
+  }
+  return v.spec.channels || [];
 }
 
 /* ── THE ACTUATOR. The phone's speaker/screen — here the terminal stands in for it.
       To drive real hardware, replace ONLY this function (SPEC-BODY-TRUTH.md §5).
       Same verbs in, different actuator listening — that is the whole design bet. ── */
 function actuate(v) {
-  const icon = { say: "🗣", sound: "🔔", sing: "🎵", burst: "✨" }[v.v] || "▶";
+  const icon = { say: "🗣", sound: "🔔", sing: "🎵", burst: "✨", gesture: "🦾", walk: "🚶", arms: "🙌", rest: "⏸" }[v.v] || "▶";
   console.log(`  ${icon} ${v.v} ${JSON.stringify(v.args)}`);
 }
 
@@ -245,10 +271,16 @@ async function tick(event, fromPerson) {
     if (!o) { console.log("  (unparseable reply dropped)"); return; }
     const executed = [];
     let motions = 0;
+    const claimed = new Set();
     for (const call of Array.isArray(o.verbs) ? o.verbs : []) {
       const v = validateVerb(call, BODY);
-      if (!v.ok) { console.log("  ✗ REJECTED — " + v.why); continue; }      // the contract: off-menu is caught, loudly
-      if (v.motion && ++motions > (BODY.limits?.max_motion_verbs_per_tick ?? 1)) { console.log("  ✗ REJECTED — motion budget spent this tick"); continue; }
+      if (!v.ok) { console.log("  ✗ REJECTED — " + v.why); continue; }
+      if (v.motion) {
+        const chs = usedChannels(v);
+        if (chs.some(c => claimed.has(c))) { console.log("  ✗ REJECTED — channel overlap with another motion verb this tick"); continue; }
+        if (++motions > (BODY.limits?.max_motion_verbs_per_tick ?? 1)) { console.log("  ✗ REJECTED — motion budget spent this tick"); continue; }
+        for (const c of chs) claimed.add(c);
+      }
       actuate(v); executed.push(v);
     }
     /* route memory writes by region permission (the loop may NEVER write identity) */

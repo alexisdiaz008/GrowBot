@@ -2,11 +2,11 @@
 PicoRobotics.py — BARE-PICO drop-in (NO Kitronik board needed).
 
 Copy this onto the Pico AS  PicoRobotics.py  and robot-server.py + act_engine.py
-run UNCHANGED. Instead of the Kitronik I2C servo chip, it drives two SG90/MG90
-servos straight off two GPIO pins using the RP2350 hardware PWM. It exposes the
+run UNCHANGED. Instead of the Kitronik I2C servo chip, it drives SG90/MG90
+servos straight off GPIO using the RP2350 hardware PWM. It exposes the
 exact same calls the firmware makes:
     board = KitronikPicoRobotics()
-    board.servoWrite(port, deg)     # port 1 = left, port 3 = right; deg 0..180
+    board.servoWrite(port, deg)     # 1/3 = legs (GP0/GP1), 4/5 = arms (GP2/GP3)
     board.i2c.writeto_mem(...)      # the firmware's "release" poke -> servo limp
 
 WIRING — each servo has 3 wires (signal / power / ground):
@@ -29,12 +29,13 @@ from the BATTERY rail, never from a logic pin / 3V3.
 To use different pins, edit PORT_GP. (SG90 and MG90S are identical here —
 same 50 Hz signal; MG90S just pulls more current.)
 
-Not yet tested on hardware — bench check: after flashing, both arms should
+Not yet tested on hardware — bench check: after flashing, both legs should
 twitch to center (90 deg) on boot, then a /routine should move both.
 """
 from machine import Pin, PWM
 
-PORT_GP = {1: 0, 3: 1}          # board "port" -> Pico GPIO  (1=left->GP0, 3=right->GP1)
+CHANNEL_PORT = {"l": 1, "r": 3, "al": 4, "ar": 5}  # wire key -> driver port
+PORT_GP = {1: 0, 3: 1, 4: 2, 5: 3}  # port -> GPIO (1/3 legs GP0/GP1, 4/5 arms GP2/GP3)
 
 _FREQ = 50                      # SG90/MG90 servos run at 50 Hz (20 ms frame)
 _MIN_US, _MAX_US = 500, 2500    # 0.5 ms = 0 deg, 2.5 ms = 180 deg

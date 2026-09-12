@@ -29,6 +29,19 @@ What the same agent gains when the phone clips onto the 2-servo legged body:
 
 Body-level budgets: 1 motion verb per tick — a gesture *or* a walk, or neither; move only when it means something. Duty window 20 s of motion per rolling 60 s.
 
+Shipped as [`body_truth.walker.json`](body_truth.walker.json). Run the harness with `--body body_truth.walker.json`.
+
+## 2b. Four-servo walker (`body_truth.walker4.json`)
+
+Adds `al`/`ar` on `gesture`, plus policy verb `arms(secs)`. `max_motion_verbs_per_tick` is 2, and the harness rejects two motion verbs that share a channel (`walk` + a leg `gesture` is illegal; `walk` + `arms` is legal).
+
+| verb | kind | motion | args | hard limits (code-enforced) |
+|---|---|---|---|---|
+| `gesture` | atomic | yes | `steps: [{l, r, al, ar, ms}]` | same band 50–130; omit any key to hold that channel |
+| `walk` | policy | yes | `secs` | legs only — `leg_l`, `leg_r` |
+| `arms` | policy | yes | `secs` | arms only — `arm_l`, `arm_r` |
+| `rest` | atomic | yes | — | all four to 90, then limp |
+
 ## 3. N-servo bodies (designed direction, not shipped)
 
 For arbitrary rigs the menu generalizes with channels addressed **by id** (see SPEC-BODY-TRUTH.md §6):

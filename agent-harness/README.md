@@ -18,6 +18,8 @@ Requires Node ≥ 18. Zero dependencies.
 
 ```sh
 node reference-loop.mjs --mock --ticks 4
+# motor body:  node reference-loop.mjs --mock --ticks 4 --body body_truth.walker.json
+# 4-servo disjoint:  node test_disjoint.mjs
 ```
 
 You'll watch the contract work end-to-end: a wake tick, verbs validated and executed, one deliberately off-menu verb (`wag_tail`) **rejected**, an out-of-range sing note **clamped**, and a closing dream pass — the only writer of identity — committing what the run meant into `memory.json`.
@@ -47,6 +49,9 @@ State persists in `memory.json` between runs — the creature you talk to tomorr
 | [SPEC-BODY-TRUTH.md](SPEC-BODY-TRUTH.md) | the `body_truth.json` schema (machine face + LLM face), the actuator contract, and the motor-body safety/trust model |
 | [VERBS.md](VERBS.md) | the actuator verb list: phone menu (shipped), 2-leg walker menu (reference), N-servo direction |
 | [body_truth.phone.json](body_truth.phone.json) | the worked example — the bare-phone body the shipped product runs |
+| [body_truth.walker.json](body_truth.walker.json) | 2-leg motor body (same phone verbs plus gesture/walk/rest) |
+| [body_truth.walker4.json](body_truth.walker4.json) | legs + arms; `walk` and `arms` may share a tick |
+| [test_disjoint.mjs](test_disjoint.mjs) | walker4 channel-overlap checks (`walk` + `arms` legal; `walk` + leg `gesture` not) |
 | [reference-loop.mjs](reference-loop.mjs) | ~300-line runnable harness: one loop, one model, the full write-permission discipline |
 | `prompts/` | the fixed regions, verbatim from the shipped engine: `constitution.txt` (swappable persona) · `safety-floor.txt` (engine-owned, always appended, never editable) · `dream.txt` (the consolidation pass). Kept verbatim on purpose, so some clauses reference phone senses (camera, mic, touch) the terminal reference doesn't feed — the creature copes; trim the persona for your rig freely. |
 | [memory.seed.json](memory.seed.json) | a fresh creature: seeded identity (with a movement temperament — never ship a blank), empty log |

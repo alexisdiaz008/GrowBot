@@ -3,7 +3,8 @@
 This is the actual trained walk policy the live GrowBot app uses, open sourced. A tiny neural net that turns body motion into leg commands, learned in simulation.
 
 - `growbot_policy.js` is the runner. Pure JS forward pass, zero dependencies, runs in a browser or Node. Verified bit-equal to the trained JAX net.
-- `policy_85mm.json` is the weights, for the 85 mm leg body.
+- `GrowBotWalker` maps two outputs onto `l`/`r`. `GrowBotArms` uses the same obs16 contract onto `al`/`ar` — train a separate `policy_arms.json`; do not reuse the walk weights. Arm mechanics: [`docs/spec-rails.md`](../docs/spec-rails.md).
+- `policy_85mm.json` is the walk weights, for the 85 mm leg body.
 
 ## The contract
 

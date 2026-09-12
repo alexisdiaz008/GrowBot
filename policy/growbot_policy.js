@@ -47,6 +47,30 @@ export class GrowBotWalker {
   }
 }
 
+// Same 2-output MLP and obs16 layout as GrowBotWalker; maps onto arm servos.
+// Train a separate weights file (policy_arms.json); do not reuse policy_85mm.json.
+export class GrowBotArms {
+  constructor(policyJson, cal={}){
+    this.p = new GrowBotPolicy(policyJson);
+    this.hist = [0,0,0,0,0,0,0,0,0,0];
+    this.toRad = policyJson.action_to_rad || 1.5708;
+    this.cal = Object.assign({L_SIGN:-1,R_SIGN:1,L_OFF:0,R_OFF:0,IMU_SIGN:[1,-1,1],gain:1,turn:0}, cal);
+  }
+  reset(){ this.hist = this.hist.map(()=>0); }
+  step(imu){
+    const s=this.cal.IMU_SIGN;
+    const obs=[ s[0]*imu.roll, s[1]*imu.pitch, s[2]*imu.yaw,
+                s[0]*imu.gr,  s[1]*imu.gp,    s[2]*imu.gy, ...this.hist];
+    const a=this.p.forward(obs);
+    this.hist = [a[0],a[1], ...this.hist.slice(0,8)];
+    const c=this.cal, deg=v=>v*this.toRad*180/Math.PI;
+    let al = 90 + c.L_OFF + c.L_SIGN*deg(a[1])*c.gain + c.turn;
+    let ar = 90 + c.R_OFF + c.R_SIGN*deg(a[0])*c.gain - c.turn;
+    const clamp=v=>Math.max(0,Math.min(180,v));
+    return { al:clamp(al), ar:clamp(ar), action:a };
+  }
+}
+
 // Steerable walker — runs a policy that declares an obs_spec of stacked frames incl. a joystick command.
 // (mels.a's kppy6: obs90 = 10 channels x 9 frames, NEWEST-FIRST frame-major:
 //   [accel_x,accel_y,accel_z, gyro_x,gyro_y,gyro_z, prevAction_0(right),prevAction_1(left), cmdForward, cmdYaw].)

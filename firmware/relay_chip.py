@@ -7,7 +7,7 @@
 #   phone -> chip:
 #     {"t":"attach","id","code"}                      handshake (sent by the app/tester)
 #     {"t":"pose","lr":"L,R"}                          WALK lane: latest-wins ~30Hz, L,R int deg 0..180
-#     {"t":"act","rid","steps":[{l,r,ms}],"mode"}      GESTURE lane: keyframes; mode "replace"|"append"
+#     {"t":"act","rid","steps":[{l,r,al,ar,ms}],"mode"}  GESTURE: optional al/ar; arms-only leaves walk running
 #     {"t":"routine","rid","name"}                     canned gesture (e.g. "wiggle")
 #     {"t":"stop","rid"}                               halt gesture + limp
 #   chip -> phone:
@@ -32,8 +32,13 @@
 #      no-wifi boot idles calmly — reboots the chip if the firmware itself ever freezes
 # The walk dead-man below is a FEATURE (limp on pose silence) and is separate from this.
 import network, socket, ssl, os, json, time, binascii, select, machine
+try:
+    from act_engine import ActEngine, subset_steps
+except ImportError:
+    print("MISSING act_engine.py — motors disabled")
+    while True:
+        time.sleep(1)
 import PicoRobotics
-from act_engine import ActEngine
 
 HOST = "growbot-relay.growbot.workers.dev"
 # Each board self-assigns a stable, unique pairing code from its hardware id, so two
@@ -47,7 +52,9 @@ print("  Enter this code in the GrowBot app.")
 print("========================================\n")
 
 board = PicoRobotics.KitronikPicoRobotics()
-L_PORT, R_PORT = 1, 3
+CHANNEL_PORT = getattr(PicoRobotics, "CHANNEL_PORT", {"l": 1, "r": 3})
+L_PORT, R_PORT = CHANNEL_PORT["l"], CHANNEL_PORT["r"]
+LEG_CHS, ARM_CHS = ("l", "r"), ("al", "ar")
 DEADMAN_MS = 500          # limp the WALK legs if no pose arrives for this long (matches the firmware)
 POLL_MS = 20              # main-loop cadence: ticks the act engine ~50Hz and polls for frames
 
@@ -189,15 +196,46 @@ def _frame_after(s, b0):                # read the rest of a frame given its alr
     return (op, pl)
 
 # ---- motor lanes ----
-def apply_pose(l, r):                   # WALK lane: direct latest-wins write
+def _write_chs(pose):
+    for ch, deg in pose.items():
+        p = CHANNEL_PORT.get(ch)
+        if p is not None:
+            board.servoWrite(p, deg)
+
+def _release_chs(chs):
+    for ch in chs:
+        p = CHANNEL_PORT.get(ch)
+        if p is not None:
+            board.release(p)
+
+def apply_pose(l, r):                   # WALK lane: legs only, latest-wins
     board.servoWrite(L_PORT, int(max(0, min(180, l))))
     board.servoWrite(R_PORT, int(max(0, min(180, r))))
 
-def _act_write(l, r):                   # GESTURE lane: act_engine's hands
-    board.servoWrite(L_PORT, l); board.servoWrite(R_PORT, r)
-def _act_release():
-    board.release(L_PORT); board.release(R_PORT)
-eng = ActEngine(_act_write, _act_release, time.ticks_ms, time.ticks_diff)
+def _enqueue_act(steps, mode):
+    mode = "append" if mode == "append" else "replace"
+    if not isinstance(steps, list):
+        return False, 0, False
+    legs = subset_steps(steps, LEG_CHS)
+    arms = subset_steps(steps, ARM_CHS)
+    if not legs and not arms:
+        return False, 0, False
+    q = 0
+    if legs:
+        ok, q = eng_legs.enqueue(legs, mode)
+        if not ok:
+            return False, q, True
+    if arms:
+        ok, qa = eng_arms.enqueue(arms, mode)
+        q = max(q, qa if ok else q)
+        if not ok:
+            return False, q, bool(legs)
+    return True, max(eng_legs.queued_ms(), eng_arms.queued_ms()), bool(legs)
+
+eng_legs = ActEngine(_write_chs, lambda: _release_chs(LEG_CHS),
+                     time.ticks_ms, time.ticks_diff, channels=LEG_CHS)
+eng_arms = ActEngine(_write_chs, lambda: _release_chs(ARM_CHS),
+                     time.ticks_ms, time.ticks_diff, channels=ARM_CHS)
 ROUTINES = {"wiggle": [{"l": 60, "r": 120, "ms": 400}, {"l": 120, "r": 60, "ms": 400},
                        {"l": 60, "r": 120, "ms": 400}, {"l": 120, "r": 60, "ms": 400},
                        {"l": 90, "r": 90, "ms": 300}]}
@@ -210,27 +248,28 @@ def _handle(s, pl):
         return None
     t = m.get("t")
     if t == "pose":
-        eng.clear()                                     # walk owns the legs; next gesture cold-starts
+        eng_legs.clear()                                # walk owns legs only; arms keep gliding
         try:
-            ls, rs = m.get("lr", "90,90").split(",")
-            apply_pose(float(ls), float(rs))
+            parts = m.get("lr", "90,90").split(",")
+            apply_pose(float(parts[0]), float(parts[1]))
         except Exception:
             pass
         if "seq" in m:                                  # latency-probe echo (tools only)
             send_text(s, json.dumps({"t": "ack", "seq": m["seq"], "ts": m.get("ts", 0)}))
         return "pose"
     if t == "act":
-        ok, q = eng.enqueue(m.get("steps", []), m.get("mode", "replace"))
+        ok, q, used_legs = _enqueue_act(m.get("steps", []), m.get("mode", "replace"))
         send_text(s, json.dumps({"t": "ack", "rid": m.get("rid"), "ok": 1 if ok else 0,
                                  "queued_ms": (q if ok else 0)}))
-        return "act"
+        return "act_legs" if used_legs else "act_arms"
     if t == "routine":
-        ok, q = eng.enqueue(ROUTINES.get(m.get("name", ""), []), "replace")
+        ok, q, used_legs = _enqueue_act(ROUTINES.get(m.get("name", ""), []), "replace")
         send_text(s, json.dumps({"t": "ack", "rid": m.get("rid"), "ok": 1 if ok else 0,
                                  "queued_ms": (q if ok else 0)}))
-        return "act"
+        return "act_legs" if used_legs else "act_arms"
     if t == "stop":
-        eng.clear(); _act_release()
+        eng_legs.clear(); eng_arms.clear()
+        _release_chs(tuple(CHANNEL_PORT.keys()))
         send_text(s, json.dumps({"t": "ack", "rid": m.get("rid"), "ok": 1, "queued_ms": 0}))
         return "stop"
     return None
@@ -243,7 +282,8 @@ def serve(s, raw):
     if _wdt is None:
         _wdt = machine.WDT(timeout=WDT_MS)              # last-resort self-heal: reboots a truly frozen
         print("hw watchdog armed (%dms)" % WDT_MS)      # chip; from here on every path must feed()
-    eng.clear()
+    eng_legs.clear()
+    eng_arms.clear()
     walk_on = False
     now = time.ticks_ms()
     last_pose = now; last_rx = now; last_ping = now
@@ -276,8 +316,9 @@ def serve(s, raw):
                     now = time.ticks_ms()
                     if time.ticks_diff(now, last) >= 1000:
                         print("poses", n, "rate", n - nlast, "Hz"); nlast = n; last = now
-                elif kind in ("act", "stop"):
-                    walk_on = False                     # the gesture lane owns the legs now
+                elif kind in ("act_legs", "stop"):
+                    walk_on = False                     # a legs gesture takes the walk lane
+                # act_arms: leave walk_on so a wave can run while walking
         else:
             # quiet tick: watch the LINK (the dead-man below guards the LEGS; this guards the SOCKET).
             # a brownout can drop WiFi with no FIN/RST — without this, serve() would spin forever deaf.
@@ -289,9 +330,10 @@ def serve(s, raw):
             if time.ticks_diff(now, last_rx) > PING_MS and time.ticks_diff(now, last_ping) > PING_MS:
                 s.write(bytes([0x89, 0x80]) + os.urandom(4))    # ping; the pong refreshes last_rx
                 last_ping = now
-        eng.tick()                                      # glide any queued gesture (~50Hz)
-        if walk_on and not eng.active and time.ticks_diff(time.ticks_ms(), last_pose) > DEADMAN_MS:
-            _act_release(); walk_on = False             # WALK dead-man: relax on silence
+        eng_legs.tick()
+        eng_arms.tick()
+        if walk_on and not eng_legs.active and time.ticks_diff(time.ticks_ms(), last_pose) > DEADMAN_MS:
+            _release_chs(LEG_CHS); walk_on = False      # WALK dead-man: legs only
             print("dead-man: walk limp (silence)")
 
 def main():
@@ -315,9 +357,10 @@ def main():
                     x.close()
             except Exception:
                 pass
-        eng.clear()
+        eng_legs.clear()
+        eng_arms.clear()
         try:
-            _act_release()                              # offline = limp: no held torque on a stale pose
+            _release_chs(tuple(CHANNEL_PORT.keys()))    # offline = limp all mapped ports
         except Exception:
             pass
         fails += 1

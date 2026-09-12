@@ -1,0 +1,82 @@
+{
+  "format": "growbot-body-truth",
+  "version": 1,
+  "id": "walker-2",
+  "name": "phone on 2-servo legs",
+  "movement_guide": "You have two positional servo legs. 90 is neutral and upright. The legs are mirrors: to move them the same way, l + r must equal 180. {l:50, r:130} stands tall; {l:130, r:50} folds forward. Omit a side to hold it. Walk is a learned gait — you only choose to travel and for how long. Invent gestures; do not only replay examples.",
+  "verbs": [
+    {
+      "v": "say",
+      "kind": "atomic",
+      "motion": false,
+      "args": { "text": { "type": "string", "max_words": 18 } },
+      "guide": "spoken aloud VERBATIM — speakable words only. Omit the verb to stay silent."
+    },
+    {
+      "v": "sound",
+      "kind": "atomic",
+      "motion": false,
+      "args": { "name": { "type": "enum", "values": ["chirp", "trill", "whistle", "warble", "blip", "alarm", "squeal", "droop", "fanfare", "purr"] } },
+      "guide": "your droid voice — sometimes alone instead of words."
+    },
+    {
+      "v": "sing",
+      "kind": "atomic",
+      "motion": false,
+      "args": { "notes": { "type": "array", "max_items": 6, "items": { "hz": [80, 900], "ms": [120, 1200] } } },
+      "guide": "up to 6 real notes played before any words."
+    },
+    {
+      "v": "burst",
+      "kind": "atomic",
+      "motion": false,
+      "args": { "name": { "type": "enum", "values": ["sparkle", "joy", "pulse", "ripple", "shiver", "rain"] } },
+      "guide": "a bloom of light on the screen — optional, rare, earned."
+    },
+    {
+      "v": "gesture",
+      "kind": "atomic",
+      "motion": true,
+      "channels": ["leg_l", "leg_r"],
+      "args": {
+        "steps": {
+          "type": "array",
+          "max_items": 8,
+          "optional": ["l", "r"],
+          "items": { "l": [50, 130], "r": [50, 130], "ms": [120, 2000] }
+        }
+      },
+      "guide": "free-authored keyframes. Omit l or r to hold that leg. Invent poses; examples show format only.",
+      "examples": [
+        { "steps": [{ "l": 60, "r": 120, "ms": 400 }, { "l": 120, "r": 60, "ms": 400 }, { "l": 90, "r": 90, "ms": 300 }] },
+        { "steps": [{ "l": 50, "r": 130, "ms": 700 }, { "l": 90, "r": 90, "ms": 400 }] }
+      ]
+    },
+    {
+      "v": "walk",
+      "kind": "policy",
+      "motion": true,
+      "channels": ["leg_l", "leg_r"],
+      "args": { "secs": { "type": "number", "min": 0.5, "max": 8 } },
+      "guide": "travel using the trained gait. You only choose duration."
+    },
+    {
+      "v": "rest",
+      "kind": "atomic",
+      "motion": true,
+      "channels": ["leg_l", "leg_r"],
+      "args": {},
+      "guide": "both legs to 90, then limp."
+    }
+  ],
+  "limits": {
+    "max_motion_verbs_per_tick": 1,
+    "duty_ms": 20000,
+    "duty_window_ms": 60000,
+    "max_gesture_ms": 3000
+  },
+  "channels": [
+    { "id": "leg_l", "idx": 0, "min": 0, "max": 180, "neutral": 90, "band": [50, 130], "sign": 1, "trim": 0 },
+    { "id": "leg_r", "idx": 1, "min": 0, "max": 180, "neutral": 90, "band": [50, 130], "sign": 1, "trim": 0 }
+  ]
+}

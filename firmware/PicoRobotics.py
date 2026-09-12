@@ -17,7 +17,9 @@ Drop this on the Pico as  PicoRobotics.py . The programs on top all call:
          its silkscreen socket numbers ARE the GPIO numbers: 0 = left,
          1 = right. Same path for a bare Pico with servos on GP0/GP1.]
 
-Ports:  1 = left, 3 = right   (port 2 is the dead socket on the Kitronik board).
+Ports:  1 = left leg, 3 = right leg, 4 = left arm, 5 = right arm
+(port 2 is the dead socket on the Kitronik board). CHANNEL_PORT maps wire keys
+l/r/al/ar onto those ports. Pins are firmware truth, not body_truth.
 
 ADVANCED override (skip auto-detect): set FORCE = "i2c" or "gpio" below, and
 edit the I2C pins / addresses or GPIO_PINS for an unusual board.
@@ -31,7 +33,8 @@ I2C_ID     = 0               # Kitronik Robotics board: I2C0 ...
 SDA_PIN    = 8               # ... SDA on GP8 ...
 SCL_PIN    = 9               # ... SCL on GP9
 CHIP_ADDRS = (0x6C, 0x40)    # Kitronik = 0x6C, generic PCA9685 = 0x40
-GPIO_PINS  = {1: 0, 3: 1}    # direct-wire: port 1 -> GP0 (left), port 3 -> GP1 (right)
+CHANNEL_PORT = {"l": 1, "r": 3, "al": 4, "ar": 5}  # wire key -> driver port
+GPIO_PINS  = {1: 0, 3: 1, 4: 2, 5: 3}  # port -> GPIO (1/3 legs GP0/GP1, 4/5 arms GP2/GP3)
 
 
 # ---- I2C / PCA9685 driver (carrier board) --- verbatim Kitronik logic ----
@@ -127,5 +130,5 @@ def KitronikPicoRobotics():
     if mode == "i2c":
         print("PicoRobotics: I2C servo board detected @", hex(addr))
         return _I2CBoard(addr)
-    print("PicoRobotics: no I2C chip -> direct-wire, GP0 = left, GP1 = right")
+    print("PicoRobotics: no I2C chip -> direct-wire, GP0/GP1 = legs, GP2/GP3 = arms")
     return _GPIOBoard()
