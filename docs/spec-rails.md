@@ -4,7 +4,7 @@ Convention over configuration for GrowBot firmware. No new wire format. Walk sta
 
 ## Resources
 
-A **channel** is `id → degrees` (0–180, 90 = neutral). Shared `body_truth` lists ids, limits, bands, verbs — **no pins**. Pins/ports live in firmware next to `GPIO_PINS` / `PORT_GP`.
+A **channel** is `id → degrees` (0–180, 90 = neutral). Shared `body_config` lists ids, limits, bands, verbs — **no pins**. Pins/ports live in firmware next to `GPIO_PINS` / `PORT_GP`.
 
 | Wire key | Channel id | Default port | Default GPIO |
 |---|---|---|---|
@@ -38,9 +38,9 @@ Missing `act_engine.py`: print and do not drive servos.
 
 ## Mind
 
-- `body_truth.phone.json` — no motors (unchanged).
-- `body_truth.walker.json` — 2-leg verbs.
-- `body_truth.walker4.json` — adds `arm_l`/`arm_r` and an `arms` policy verb.
+- `body_config.phone.json` — no motors (unchanged).
+- `body_config.walker.json` — 2-leg verbs.
+- `body_config.walker4.json` — adds `arm_l`/`arm_r` and an `arms` policy verb.
 
 One tick may emit two motion verbs only if their **used channel sets are disjoint**. `walk` + arms-only `gesture` is legal; `walk` + a gesture that names `l`/`r` is not.
 

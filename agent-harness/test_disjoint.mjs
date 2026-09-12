@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const body = JSON.parse(readFileSync(join(HERE, "body_truth.walker4.json"), "utf8"));
+const body = JSON.parse(readFileSync(join(HERE, "body_config.walker4.json"), "utf8"));
 const WIRE_KEYS = { l: "leg_l", r: "leg_r", al: "arm_l", ar: "arm_r" };
 
 function usedChannels(v) {

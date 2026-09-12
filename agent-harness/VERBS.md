@@ -1,8 +1,8 @@
 # Actuator verb list
 
-Every verb the agent can emit, per body. The agent composes freely from its body's menu; anything off-menu is rejected by the harness (see [SPEC-BODY-TRUTH.md](SPEC-BODY-TRUTH.md) §3–5). `motion: true` verbs count against the per-tick motion budget and duty limits.
+Every verb the agent can emit, per body. The agent composes freely from its body's menu; anything off-menu is rejected by the harness (see [SPEC-BODY-CONFIG.md](SPEC-BODY-CONFIG.md) §3–5). `motion: true` verbs count against the per-tick motion budget and duty limits.
 
-## 1. Phone body (canonical — `body_truth.phone.json`, shipped)
+## 1. Phone body (canonical — `body_config.phone.json`, shipped)
 
 | verb | kind | motion | args | hard limits (code-enforced) |
 |---|---|---|---|---|
@@ -23,15 +23,15 @@ What the same agent gains when the phone clips onto the 2-servo legged body:
 
 | verb | kind | motion | args | hard limits (code-enforced) |
 |---|---|---|---|---|
-| `gesture` | atomic | yes | `steps: [{l, r, ms}]` | angles clamped in code to the file's soft band (the shipped walker file declares 50–130°, 90 = neutral; see SPEC-BODY-TRUTH §5 for the trim→band→min/max order); ms 120–2000 per step; whole gesture ≤3000 ms. Omit `l` or `r` in a step to hold that leg. **Free-authored** — the model invents the keyframes; named packs (wiggle/bow/sway) are few-shot examples, not the menu. |
+| `gesture` | atomic | yes | `steps: [{l, r, ms}]` | angles clamped in code to the file's soft band (the shipped walker file declares 50–130°, 90 = neutral; see SPEC-BODY-CONFIG §5 for the trim→band→min/max order); ms 120–2000 per step; whole gesture ≤3000 ms. Omit `l` or `r` in a step to hold that leg. **Free-authored** — the model invents the keyframes; named packs (wiggle/bow/sway) are few-shot examples, not the menu. |
 | `walk` | **policy** | yes | `secs: number` | 0.5–8 s. A trained balance policy (30 Hz against the IMU) owns the gait; the agent only decides *to travel* and for how long. |
 | `rest` | atomic | yes | — | both legs to neutral, then release (servos limp) |
 
 Body-level budgets: 1 motion verb per tick — a gesture *or* a walk, or neither; move only when it means something. Duty window 20 s of motion per rolling 60 s.
 
-Shipped as [`body_truth.walker.json`](body_truth.walker.json). Run the harness with `--body body_truth.walker.json`.
+Shipped as [`body_config.walker.json`](body_config.walker.json). Run the harness with `--body body_config.walker.json`.
 
-## 2b. Four-servo walker (`body_truth.walker4.json`)
+## 2b. Four-servo walker (`body_config.walker4.json`)
 
 Adds `al`/`ar` on `gesture`, plus policy verb `arms(secs)`. `max_motion_verbs_per_tick` is 2, and the harness rejects two motion verbs that share a channel (`walk` + a leg `gesture` is illegal; `walk` + `arms` is legal).
 
@@ -44,7 +44,7 @@ Adds `al`/`ar` on `gesture`, plus policy verb `arms(secs)`. `max_motion_verbs_pe
 
 ## 3. N-servo bodies (designed direction, not shipped)
 
-For arbitrary rigs the menu generalizes with channels addressed **by id** (see SPEC-BODY-TRUTH.md §6):
+For arbitrary rigs the menu generalizes with channels addressed **by id** (see SPEC-BODY-CONFIG.md §6):
 
 | verb | kind | shape |
 |---|---|---|

@@ -1,5 +1,5 @@
 {
-  "format": "growbot-body-truth",
+  "format": "growbot-body-config",
   "version": 1,
   "id": "phone-bare",
   "name": "bare phone (speaker, synth, screen — no motors)",

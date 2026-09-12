@@ -19,7 +19,7 @@ Drop this on the Pico as  PicoRobotics.py . The programs on top all call:
 
 Ports:  1 = left leg, 3 = right leg, 4 = left arm, 5 = right arm
 (port 2 is the dead socket on the Kitronik board). CHANNEL_PORT maps wire keys
-l/r/al/ar onto those ports. Pins are firmware truth, not body_truth.
+l/r/al/ar onto those ports. Pins are firmware truth, not body_config.
 
 ADVANCED override (skip auto-detect): set FORCE = "i2c" or "gpio" below, and
 edit the I2C pins / addresses or GPIO_PINS for an unusual board.

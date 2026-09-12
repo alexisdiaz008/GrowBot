@@ -7,7 +7,7 @@ The mind-side of [GrowBot](https://growbot.dev) — a phone-as-brain digital cre
 ## The whole contract in one line
 
 ```
-the agent emits verbs  →  body_truth defines the verbs  →  the actuator executes them
+the agent emits verbs  →  body_config defines the verbs  →  the actuator executes them
 ```
 
 The agent never sees hardware; it sees a menu. Swap the body file and the same mind drives a different body — a bare phone today, servo legs tomorrow, your rig after that. Off-menu output is rejected by the harness, loudly: that rejection working is the health signal of the whole design.
@@ -18,7 +18,7 @@ Requires Node ≥ 18. Zero dependencies.
 
 ```sh
 node reference-loop.mjs --mock --ticks 4
-# motor body:  node reference-loop.mjs --mock --ticks 4 --body body_truth.walker.json
+# motor body:  node reference-loop.mjs --mock --ticks 4 --body body_config.walker.json
 # 4-servo disjoint:  node test_disjoint.mjs
 ```
 
@@ -46,11 +46,11 @@ State persists in `memory.json` between runs — the creature you talk to tomorr
 | file | what it is |
 |---|---|
 | [SPEC-MEMORY.md](SPEC-MEMORY.md) | the memory-region spec: constitution / identity / goals / working memory / episodic log, who may write what, and the failure modes you will otherwise rediscover |
-| [SPEC-BODY-TRUTH.md](SPEC-BODY-TRUTH.md) | the `body_truth.json` schema (machine face + LLM face), the actuator contract, and the motor-body safety/trust model |
+| [SPEC-BODY-CONFIG.md](SPEC-BODY-CONFIG.md) | the `body_config.json` schema (machine face + LLM face), the actuator contract, and the motor-body safety/trust model |
 | [VERBS.md](VERBS.md) | the actuator verb list: phone menu (shipped), 2-leg walker menu (reference), N-servo direction |
-| [body_truth.phone.json](body_truth.phone.json) | the worked example — the bare-phone body the shipped product runs |
-| [body_truth.walker.json](body_truth.walker.json) | 2-leg motor body (same phone verbs plus gesture/walk/rest) |
-| [body_truth.walker4.json](body_truth.walker4.json) | legs + arms; `walk` and `arms` may share a tick |
+| [body_config.phone.json](body_config.phone.json) | the worked example — the bare-phone body the shipped product runs |
+| [body_config.walker.json](body_config.walker.json) | 2-leg motor body (same phone verbs plus gesture/walk/rest) |
+| [body_config.walker4.json](body_config.walker4.json) | legs + arms; `walk` and `arms` may share a tick |
 | [test_disjoint.mjs](test_disjoint.mjs) | walker4 channel-overlap checks (`walk` + `arms` legal; `walk` + leg `gesture` not) |
 | [reference-loop.mjs](reference-loop.mjs) | ~300-line runnable harness: one loop, one model, the full write-permission discipline |
 | `prompts/` | the fixed regions, verbatim from the shipped engine: `constitution.txt` (swappable persona) · `safety-floor.txt` (engine-owned, always appended, never editable) · `dream.txt` (the consolidation pass). Kept verbatim on purpose, so some clauses reference phone senses (camera, mic, touch) the terminal reference doesn't feed — the creature copes; trim the persona for your rig freely. |
@@ -62,11 +62,11 @@ State persists in `memory.json` between runs — the creature you talk to tomorr
 2. **Only a real exchange earns a memory slot.** Idle ticks that push "(stayed quiet)" entries will evict the actual conversation within minutes. This bug was independently rediscovered twice; it is an attractor. See SPEC-MEMORY §4.
 3. **Narration ≠ action.** To act, the model must emit the verb in the same reply. Prose intent is treated as nothing.
 4. **The prompt is advisory; the clamp is code.** Validate against the menu, clamp to the machine face's limits, budget motion. A hallucinated 999° means "far", not a crash — and `wag_tail` on a body without a tail means nothing at all.
-5. **Safety is engine-owned.** The safety floor is appended after any loaded persona and can't be stripped by one. Dead-man, duty budgets, and boot-limp are not verbs. And a downloaded body_truth commands real motors — **calibrate locally before motion; never trust a file's declared limits as a safety control.**
+5. **Safety is engine-owned.** The safety floor is appended after any loaded persona and can't be stripped by one. Dead-man, duty budgets, and boot-limp are not verbs. And a downloaded body_config commands real motors — **calibrate locally before motion; never trust a file's declared limits as a safety control.**
 
 ## Porting to your hardware
 
-Replace one function — `actuate()` in the reference loop — with your transport, and write a `body_truth` for your rig (SPEC-BODY-TRUTH §6 first: channel table, boot-limp, per-device calibration layered on top, and the power-budget math if you're past ~4 servos). One honest caveat before you wire it up: the phone actuator is open-loop (spoken intent, cooperative human); motors close the loop. The interface survives the swap; the control problem doesn't — re-validate behavior once your verbs actually change what the sensors see.
+Replace one function — `actuate()` in the reference loop — with your transport, and write a `body_config` for your rig (SPEC-BODY-CONFIG §6 first: channel table, boot-limp, per-device calibration layered on top, and the power-budget math if you're past ~4 servos). One honest caveat before you wire it up: the phone actuator is open-loop (spoken intent, cooperative human); motors close the loop. The interface survives the swap; the control problem doesn't — re-validate behavior once your verbs actually change what the sensors see.
 
 Out of scope here, by design: the sensing side (the mirror spec: sensor channels → felt magnitudes, "senses are felt, not reported"), the reflex tier, the energy economy, onboarding, the loadable-personality ("soul") format and its gallery, and the relay/firmware protocol for the shipped 2-leg body. The kit is the mind and the body contract; ask if you need the rest.
 

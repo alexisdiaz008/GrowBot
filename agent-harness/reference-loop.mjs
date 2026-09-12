@@ -3,7 +3,7 @@
    reference-loop.mjs — minimal GrowBot agent harness. One loop, one model.
 
    The whole contract in three lines:
-     the agent emits verbs  →  body_truth defines the verbs  →  the actuator executes them
+     the agent emits verbs  →  body_config defines the verbs  →  the actuator executes them
    Off-menu verbs are REJECTED (that is the contract, not free text). Memory is
    one blob with regions that have different writers — see SPEC-MEMORY.md.
 
@@ -48,7 +48,7 @@ if (!MOCK && !LOCAL && !KEY) {
 const BODY_NAME = (() => {
   const i = argv.indexOf("--body");
   if (i >= 0) return argv[i + 1];
-  return process.env.BODY || "body_truth.phone.json";
+  return process.env.BODY || "body_config.phone.json";
 })();
 const CONSTITUTION = readFileSync(join(HERE, "prompts/constitution.txt"), "utf8").trim();
 const SAFETY_FLOOR = readFileSync(join(HERE, "prompts/safety-floor.txt"), "utf8").trim();
@@ -63,7 +63,7 @@ const save = () => writeFileSync(MEM_PATH, JSON.stringify(mem, null, 2));
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 const clean = (s, n) => String(s == null ? "" : s).replace(/\s+/g, " ").trim().slice(0, n);
 
-/* ── the verb menu, rendered from body_truth into the prompt (face 2 of body truth) ── */
+/* ── the verb menu, rendered from body_config into the prompt (face 2 of body config) ── */
 function verbMenu(body) {
   const rows = body.verbs.map(v => {
     const ex = v.examples ? "  e.g. " + v.examples.map(e => JSON.stringify(e)).join(" · ") : "";
@@ -135,7 +135,7 @@ function usedChannels(v) {
 }
 
 /* ── THE ACTUATOR. The phone's speaker/screen — here the terminal stands in for it.
-      To drive real hardware, replace ONLY this function (SPEC-BODY-TRUTH.md §5).
+      To drive real hardware, replace ONLY this function (SPEC-BODY-CONFIG.md §5).
       Same verbs in, different actuator listening — that is the whole design bet. ── */
 function actuate(v) {
   const icon = { say: "🗣", sound: "🔔", sing: "🎵", burst: "✨", gesture: "🦾", walk: "🚶", arms: "🙌", rest: "⏸" }[v.v] || "▶";
