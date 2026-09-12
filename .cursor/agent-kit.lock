@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "kitSha": "8611b0ca81ccbd030eee7a985eb9cb8df111832b",
+  "profile": "generic",
+  "managed": [
+    ".cursor/hooks/deny-force-push.sh",
+    ".cursor/hooks/deny-secrets.sh",
+    ".cursor/rules/anti-sycophancy-code-discipline.mdc",
+    ".cursor/rules/engineering.mdc",
+    ".cursor/skills/ci-green",
+    ".cursor/skills/gh-issue-workflow",
+    ".cursor/skills/ship-pr",
+    ".cursor/skills/spec-driven-dev",
+    ".cursor/skills/systematic-debugging",
+    ".cursor/skills/writing-tests"
+  ]
+}
