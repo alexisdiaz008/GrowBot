@@ -1,8 +1,7 @@
-/** Channel ids and wire aliases — shared by the reference loop and tests.
+/** Channel ids — shared by the reference loop and tests.
  *
- * Engines and body_config `channels[].id` speak channel ids.
- * Gesture JSON still uses wire aliases (l/r/al/ar) because that is the
- * public protocol; we translate at this edge. See docs/spec-rails.md.
+ * Gesture JSON uses the same channel ids as firmware. Duration key is
+ * `milliseconds`. See docs/spec-rails.md.
  */
 
 export const CHANNEL_LEFT_LEG = "leg_l";
@@ -10,19 +9,7 @@ export const CHANNEL_RIGHT_LEG = "leg_r";
 export const CHANNEL_LEFT_ARM = "arm_l";
 export const CHANNEL_RIGHT_ARM = "arm_r";
 
-export const WIRE_LEFT_LEG = "l";
-export const WIRE_RIGHT_LEG = "r";
-export const WIRE_LEFT_ARM = "al";
-export const WIRE_RIGHT_ARM = "ar";
-
-export const WIRE_TO_CHANNEL = {
-  [WIRE_LEFT_LEG]: CHANNEL_LEFT_LEG,
-  [WIRE_RIGHT_LEG]: CHANNEL_RIGHT_LEG,
-  [WIRE_LEFT_ARM]: CHANNEL_LEFT_ARM,
-  [WIRE_RIGHT_ARM]: CHANNEL_RIGHT_ARM,
-};
-
-export const KEYFRAME_MILLISECONDS_KEY = "ms";
+export const KEYFRAME_MILLISECONDS_KEY = "milliseconds";
 export const VERB_NAME_FIELD = "v";
 export const VERB_GESTURE = "gesture";
 export const ARG_TYPE_STRING = "string";
@@ -38,7 +25,7 @@ export function usedChannelsForVerb(verbCall, body) {
     for (const step of verbCall.args.steps) {
       for (const key of Object.keys(step)) {
         if (key === KEYFRAME_MILLISECONDS_KEY) continue;
-        used.add(WIRE_TO_CHANNEL[key] || key);
+        used.add(key);
       }
     }
     return [...used];

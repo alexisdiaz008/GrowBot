@@ -1,4 +1,4 @@
-"""Hardware-free ActEngine + channel-translation tests.
+"""Hardware-free ActEngine + pose-permit tests.
 
 Run: python3 firmware/test_act_engine.py
 """
@@ -12,22 +12,15 @@ from channels import (
     ARM_CHANNEL_IDS,
     CHANNEL_LEFT_ARM,
     CHANNEL_LEFT_LEG,
-    CHANNEL_PORT,
     CHANNEL_RIGHT_ARM,
     CHANNEL_RIGHT_LEG,
-    CHANNEL_TO_WIRE,
     ENQUEUE_MODE_APPEND,
     ERROR_QUEUE_FULL,
     KEYFRAME_MILLISECONDS_KEY,
     LEG_CHANNEL_IDS,
     SERVO_NEUTRAL_DEGREES,
-    WIRE_LEFT_ARM,
-    WIRE_LEFT_LEG,
-    WIRE_RIGHT_ARM,
-    WIRE_RIGHT_LEG,
-    WIRE_TO_CHANNEL,
-    translate_wire_steps_to_channels,
-    wire_keys_for_channel_ports,
+    permit_pose,
+    permit_poses,
 )
 
 
@@ -193,29 +186,15 @@ def test_subset_steps_for_channels():
     assert_eq(subset_steps_for_channels(None, LEG_CHANNEL_IDS), [])
 
 
-def test_translate_wire_steps_to_channel_ids():
-    steps = [{
-        WIRE_LEFT_LEG: 10, WIRE_RIGHT_LEG: 20,
-        WIRE_LEFT_ARM: 30, WIRE_RIGHT_ARM: 40,
-        KEYFRAME_MILLISECONDS_KEY: 100,
-    }]
-    assert_eq(translate_wire_steps_to_channels(steps), [{
-        CHANNEL_LEFT_LEG: 10, CHANNEL_RIGHT_LEG: 20,
-        CHANNEL_LEFT_ARM: 30, CHANNEL_RIGHT_ARM: 40,
-        KEYFRAME_MILLISECONDS_KEY: 100,
-    }])
-    assert_eq(translate_wire_steps_to_channels("soup"), [])
-    assert_eq(translate_wire_steps_to_channels(None), [])
-    assert_eq(translate_wire_steps_to_channels([{KEYFRAME_MILLISECONDS_KEY: 100}]), [])
-
-
-def test_wire_alias_tables_are_inverses():
-    for wire_key, channel_id in WIRE_TO_CHANNEL.items():
-        assert_eq(CHANNEL_TO_WIRE[channel_id], wire_key)
-    assert_eq(
-        wire_keys_for_channel_ports(CHANNEL_PORT),
-        [WIRE_LEFT_LEG, WIRE_RIGHT_LEG, WIRE_LEFT_ARM, WIRE_RIGHT_ARM],
-    )
+def test_permit_pose_keeps_channel_ids_and_strips_unknown():
+    assert_eq(permit_pose({
+        CHANNEL_LEFT_LEG: 70, "l": 1, "ms": 400, KEYFRAME_MILLISECONDS_KEY: 400,
+    }), {CHANNEL_LEFT_LEG: 70, KEYFRAME_MILLISECONDS_KEY: 400})
+    assert_eq(permit_pose({KEYFRAME_MILLISECONDS_KEY: 100}), None)
+    assert_eq(permit_pose("soup"), None)
+    assert_eq(permit_poses([{CHANNEL_RIGHT_ARM: 130}, {KEYFRAME_MILLISECONDS_KEY: 10}]),
+              [{CHANNEL_RIGHT_ARM: 130}])
+    assert_eq(permit_poses("soup"), [])
 
 
 if __name__ == "__main__":

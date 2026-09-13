@@ -49,7 +49,7 @@ const out = $('#out');
 const TIMEOUT = 6000;
 
 function clean(u){ return u.trim().replace(/\/+$/,''); }
-function wsURL(base){ return base.replace(/^http/,'ws') + '/ws'; }
+function wsURL(base){ return base.replace(/^http/,'ws') + '/walk'; }
 
 async function http(base, path, {method='GET', json=null}={}){
   const ctl = new AbortController();
@@ -75,58 +75,68 @@ const GROUPS = [
         const r = await http(b,'/stats');
         const j = parse(r.text);
         if(r.status!==200) return {state:'FAIL', detail:`status ${r.status} — ${r.text.slice(0,120)}`};
-        if(!j || !j.act || typeof j.act.active==='undefined' || typeof j.act.queued_ms==='undefined')
-          return {state:'FAIL', detail:`200 but missing act.active/act.queued_ms\n${r.text.slice(0,160)}`};
-        return {state:'PASS', detail:`200 · act=${JSON.stringify(j.act)} up_s=${j.up_s}`};
+        if(!j || j.protocol!=='growbot-channels-1')
+          return {state:'FAIL', detail:`200 but missing protocol=growbot-channels-1\n${r.text.slice(0,160)}`};
+        if(!j.act || typeof j.act.active==='undefined' || typeof j.act.queued_milliseconds==='undefined')
+          return {state:'FAIL', detail:`200 but missing act.active/act.queued_milliseconds\n${r.text.slice(0,160)}`};
+        return {state:'PASS', detail:`200 · protocol=${j.protocol} act=${JSON.stringify(j.act)} up_s=${j.up_s}`};
       }},
-    { name:'gesture plays, replies instantly (legs should wiggle)', ep:'POST /act', run: async (b)=>{
-        const steps=[{l:120,r:60,ms:400},{l:60,r:120,ms:400},{l:90,r:90,ms:300}]; // 1100ms motion
-        const r = await http(b,'/act',{method:'POST',json:{steps,mode:'replace'}});
+    { name:'gesture plays, replies instantly (legs should wiggle)', ep:'POST /plans', run: async (b)=>{
+        const steps=[{leg_l:120,leg_r:60,milliseconds:400},{leg_l:60,leg_r:120,milliseconds:400},{leg_l:90,leg_r:90,milliseconds:300}];
+        const r = await http(b,'/plans',{method:'POST',json:{steps,mode:'replace'}});
         const j = parse(r.text);
-        if(r.status!==200 || !j || j.ok!==1) return {state:'FAIL', detail:`expected 200 {ok:1,...}, got ${r.status} ${r.text.slice(0,120)}`};
-        if(j.queued_ms!==1100) return {state:'WARN', detail:`200 ok but queued_ms=${j.queued_ms}, expected 1100 (sum of step ms). Motion still ran.`};
+        if(r.status!==200 || !j || j.ok!==true) return {state:'FAIL', detail:`expected 200 {ok:true,...}, got ${r.status} ${r.text.slice(0,120)}`};
+        if(j.queued_milliseconds!==1100) return {state:'WARN', detail:`200 ok but queued_milliseconds=${j.queued_milliseconds}, expected 1100 (sum of step milliseconds). Motion still ran.`};
         if(r.ms>=1100) return {state:'FAIL', detail:`server BLOCKED ${Math.round(r.ms)}ms for the 1100ms motion — must reply immediately and play locally`};
-        if(r.ms>=800) return {state:'WARN', detail:`reply took ${Math.round(r.ms)}ms (mostly link latency?). queued_ms=1100 ✓`};
-        return {state:'PASS', detail:`200 {ok:1,queued_ms:1100} · replied in ${Math.round(r.ms)}ms (didn't block)`};
+        if(r.ms>=800) return {state:'WARN', detail:`reply took ${Math.round(r.ms)}ms (mostly link latency?). queued_milliseconds=1100 ✓`};
+        return {state:'PASS', detail:`200 {ok:true,queued_milliseconds:1100} · replied in ${Math.round(r.ms)}ms (didn't block)`};
       }},
-    { name:'stop is instant + limp', ep:'GET /stop', run: async (b)=>{
-        const r = await http(b,'/stop');
-        if(r.status!==200) return {state:'FAIL', detail:`status ${r.status}`};
-        if(!/stop/i.test(r.text)) return {state:'WARN', detail:`200 but body was "${r.text.slice(0,60)}" (reference returns "stopped")`};
-        return {state:'PASS', detail:`200 "${r.text.trim()}" — legs should be limp now`};
+    { name:'stop is instant + limp', ep:'POST /stop', run: async (b)=>{
+        const r = await http(b,'/stop',{method:'POST'});
+        const j = parse(r.text);
+        if(r.status!==200 || !j || j.ok!==true) return {state:'FAIL', detail:`expected 200 {ok:true}, got ${r.status} ${r.text.slice(0,80)}`};
+        return {state:'PASS', detail:`200 {ok:true} — legs should be limp now`};
       }},
   ]},
   { title:'Full conformance — polish', tests:[
-    { name:'backpressure: oversized plan refused', ep:'POST /act (×6 of 3000ms)', run: async (b)=>{
-        const r = await http(b,'/act',{method:'POST',json:{steps:Array(6).fill({l:90,r:90,ms:3000})}});
-        if(r.status===409 && /queue full|full/i.test(r.text)) return {state:'PASS', detail:`409 "${r.text.slice(0,80)}"`};
-        return {state:'FAIL', detail:`expected 409 queue-full, got ${r.status} ${r.text.slice(0,100)}`};
+    { name:'backpressure: oversized plan refused', ep:'POST /plans (×6 of 3000ms)', run: async (b)=>{
+        const r = await http(b,'/plans',{method:'POST',json:{steps:Array(6).fill({leg_l:90,leg_r:90,milliseconds:3000})}});
+        const j = parse(r.text);
+        if(r.status===409 && j && j.error==='queue_full') return {state:'PASS', detail:`409 "${r.text.slice(0,80)}"`};
+        return {state:'FAIL', detail:`expected 409 queue_full, got ${r.status} ${r.text.slice(0,100)}`};
       }},
-    { name:'validation: garbage rejected', ep:'POST /act {steps:"soup"}', run: async (b)=>{
-        const r = await http(b,'/act',{method:'POST',json:{steps:'soup'}});
+    { name:'validation: garbage rejected', ep:'POST /plans {steps:"soup"}', run: async (b)=>{
+        const r = await http(b,'/plans',{method:'POST',json:{steps:'soup'}});
         if(r.status===400) return {state:'PASS', detail:`400 as expected`};
         return {state:'FAIL', detail:`expected 400, got ${r.status} ${r.text.slice(0,100)}`};
       }},
-    { name:'canned routine', ep:'GET /routine?name=wiggle', run: async (b)=>{
-        const r = await http(b,'/routine?name=wiggle');
-        if(r.status===200 && /queued/i.test(r.text)) return {state:'PASS', detail:`200 "${r.text.trim()}"`};
+    { name:'canned routine', ep:'POST /routines/wiggle', run: async (b)=>{
+        const r = await http(b,'/routines/wiggle',{method:'POST'});
+        const j = parse(r.text);
+        if(r.status===200 && j && j.ok===true && typeof j.queued_milliseconds==='number')
+          return {state:'PASS', detail:`200 queued_milliseconds=${j.queued_milliseconds}`};
         return {state:'WARN', detail:`got ${r.status} "${r.text.slice(0,80)}" (routines are optional)`};
       }},
-    { name:'walk transport: WebSocket /ws opens + accepts poses', ep:'WS /ws', run: (b)=> new Promise((resolve)=>{
+    { name:'walk transport: WebSocket /walk opens + accepts JSON poses', ep:'WS /walk', run: (b)=> new Promise((resolve)=>{
         let ws, done=false;
         const finish = (state, detail)=>{ if(done) return; done=true; try{ws&&ws.close();}catch(e){} resolve({state,detail}); };
-        const t = setTimeout(()=>finish('FAIL','no open/error within 6s — is /ws implemented?'), TIMEOUT);
+        const t = setTimeout(()=>finish('FAIL','no open/error within 6s — is /walk implemented?'), TIMEOUT);
         try{ ws = new WebSocket(wsURL(b)); }
         catch(e){ clearTimeout(t); return finish('FAIL', 'could not construct WebSocket: '+e.message); }
         ws.onopen = ()=>{
           try{
-            ws.send('70,110');
-            setTimeout(()=>{ try{ws.send('90,90');}catch(e){} clearTimeout(t);
-              finish('PASS','connected; sent "70,110" then "90,90" — legs should have nudged then centered'); }, 450);
+            ws.send(JSON.stringify({leg_l:70,leg_r:110}));
+            setTimeout(()=>{ try{ws.send(JSON.stringify({leg_l:90,leg_r:90}));}catch(e){} clearTimeout(t);
+              finish('PASS','connected; sent {"leg_l":70,"leg_r":110} then centered — legs should have nudged'); }, 450);
           }catch(e){ clearTimeout(t); finish('FAIL','open but send failed: '+e.message); }
         };
-        ws.onerror = ()=>{ clearTimeout(t); finish('FAIL','socket error (wss cert? /ws not served? mixed content?)'); };
+        ws.onerror = ()=>{ clearTimeout(t); finish('FAIL','socket error (wss cert? /walk not served? mixed content?)'); };
       })},
+    { name:'legacy POST /act is gone', ep:'POST /act', run: async (b)=>{
+        const r = await http(b,'/act',{method:'POST',json:{steps:[{l:90,r:90,ms:400}]}});
+        if(r.status===404) return {state:'PASS', detail:`404 — old /act dialect is not accepted`};
+        return {state:'FAIL', detail:`expected 404, got ${r.status} ${r.text.slice(0,100)}`};
+      }},
   ]},
 ];
 

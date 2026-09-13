@@ -15,7 +15,7 @@ Each servo has 3 wires: signal (orange) · power (red) · ground (brown).
 
 Both reds go to battery **+**. Then tie ALL the grounds together: battery **−**, a Pico **GND** pin, and both servo browns. One shared ground rail. That is the whole wiring.
 
-Optional arms (same 180° servos): left arm signal **GP2**, right arm **GP3**, reds and grounds on the same rails. Firmware accepts `/act` keys `al`/`ar` without changing the 2-leg walk stream. See [`docs/spec-rails.md`](docs/spec-rails.md).
+Optional arms (same 180° servos): left arm signal **GP2**, right arm **GP3**, reds and grounds on the same rails. Firmware accepts `arm_l`/`arm_r` on `POST /plans` without changing the 2-leg walk stream. See [`docs/spec-rails.md`](docs/spec-rails.md).
 
 > Powering from USB while testing on a desk is fine for gentle moves, but real walking needs the battery pack. The servos spike harder than USB can supply.
 
@@ -59,11 +59,12 @@ Worth reading even if you are building your own body, because the app assumes al
 - **The two legs are mirror images of each other**, because the servos sit at opposite ends with
   their shafts pointing outward. The consequence catches everybody: **the same number sent to both
   legs swings them in opposite directions.** That is a scissor or a twist, not a move together.
-- **To move both legs the same way, the two numbers must add up to 180.** `{l:90, r:90}` is neutral
-  and upright. `{l:50, r:130}` sweeps both legs down and levers the body up to stand tall.
-  `{l:130, r:50}` sweeps both up and folds it forward. Those two are bench-calibrated.
-- **Use that to settle left and right without measuring anything.** Send `{l:50, r:130}`. If the body
-  pushes **up**, your left and right are correct. If it folds forward instead, swap them.
+- **To move both legs the same way, the two numbers must add up to 180.** `{"leg_l":90,"leg_r":90}` is
+  neutral and upright. `{"leg_l":50,"leg_r":130}` sweeps both legs down and levers the body up to
+  stand tall. `{"leg_l":130,"leg_r":50}` sweeps both up and folds it forward. Those two are
+  bench-calibrated.
+- **Use that to settle left and right without measuring anything.** Send `{"leg_l":50,"leg_r":130}`.
+  If the body pushes **up**, your left and right are correct. If it folds forward instead, swap them.
 
 Building a custom body? On the standard build the mirroring comes from how the servos are physically
 mounted. If yours are mounted the same way round, or you are using serial servos that take direction

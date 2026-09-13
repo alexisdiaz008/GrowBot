@@ -3,7 +3,7 @@
   "version": 1,
   "id": "walker-2",
   "name": "phone on 2-servo legs",
-  "movement_guide": "You have two positional servo legs. 90 is neutral and upright. The legs are mirrors: to move them the same way, l + r must equal 180. {l:50, r:130} stands tall; {l:130, r:50} folds forward. Omit a side to hold it. Walk is a learned gait — you only choose to travel and for how long. Invent gestures; do not only replay examples.",
+  "movement_guide": "You have two positional servo legs. 90 is neutral and upright. The legs are mirrors: to move them the same way, leg_l + leg_r must equal 180. {leg_l:50, leg_r:130} stands tall; {leg_l:130, leg_r:50} folds forward. Omit a side to hold it. Walk is a learned gait — you only choose to travel and for how long. Invent gestures; do not only replay examples.",
   "verbs": [
     {
       "v": "say",
@@ -42,14 +42,14 @@
         "steps": {
           "type": "array",
           "max_items": 8,
-          "optional": ["l", "r"],
-          "items": { "l": [50, 130], "r": [50, 130], "ms": [120, 2000] }
+          "optional": ["leg_l", "leg_r"],
+          "items": { "leg_l": [50, 130], "leg_r": [50, 130], "milliseconds": [120, 2000] }
         }
       },
-      "guide": "free-authored keyframes. Omit l or r to hold that leg. Invent poses; examples show format only.",
+      "guide": "free-authored keyframes. Omit leg_l or leg_r to hold that leg. Invent poses; examples show format only.",
       "examples": [
-        { "steps": [{ "l": 60, "r": 120, "ms": 400 }, { "l": 120, "r": 60, "ms": 400 }, { "l": 90, "r": 90, "ms": 300 }] },
-        { "steps": [{ "l": 50, "r": 130, "ms": 700 }, { "l": 90, "r": 90, "ms": 400 }] }
+        { "steps": [{ "leg_l": 60, "leg_r": 120, "milliseconds": 400 }, { "leg_l": 120, "leg_r": 60, "milliseconds": 400 }, { "leg_l": 90, "leg_r": 90, "milliseconds": 300 }] },
+        { "steps": [{ "leg_l": 50, "leg_r": 130, "milliseconds": 700 }, { "leg_l": 90, "leg_r": 90, "milliseconds": 400 }] }
       ]
     },
     {

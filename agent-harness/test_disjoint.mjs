@@ -6,10 +6,10 @@ import { fileURLToPath } from "node:url";
 import {
   VERB_GESTURE,
   VERB_NAME_FIELD,
-  WIRE_LEFT_ARM,
-  WIRE_LEFT_LEG,
-  WIRE_RIGHT_ARM,
-  WIRE_RIGHT_LEG,
+  CHANNEL_LEFT_ARM,
+  CHANNEL_LEFT_LEG,
+  CHANNEL_RIGHT_ARM,
+  CHANNEL_RIGHT_LEG,
   KEYFRAME_MILLISECONDS_KEY,
   channelSetsOverlap,
 } from "./channels.mjs";
@@ -25,11 +25,11 @@ const walk = { [VERB_NAME_FIELD]: VERB_WALK, args: { secs: 1 } };
 const arms = { [VERB_NAME_FIELD]: VERB_ARMS, args: { secs: 1 } };
 const gestureLegs = {
   [VERB_NAME_FIELD]: VERB_GESTURE,
-  args: { steps: [{ [WIRE_LEFT_LEG]: 60, [WIRE_RIGHT_LEG]: 120, [KEYFRAME_MILLISECONDS_KEY]: 400 }] },
+  args: { steps: [{ [CHANNEL_LEFT_LEG]: 60, [CHANNEL_RIGHT_LEG]: 120, [KEYFRAME_MILLISECONDS_KEY]: 400 }] },
 };
 const gestureArms = {
   [VERB_NAME_FIELD]: VERB_GESTURE,
-  args: { steps: [{ [WIRE_LEFT_ARM]: 50, [WIRE_RIGHT_ARM]: 130, [KEYFRAME_MILLISECONDS_KEY]: 400 }] },
+  args: { steps: [{ [CHANNEL_LEFT_ARM]: 50, [CHANNEL_RIGHT_ARM]: 130, [KEYFRAME_MILLISECONDS_KEY]: 400 }] },
 };
 const rest = { [VERB_NAME_FIELD]: VERB_REST, args: {} };
 

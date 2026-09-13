@@ -23,7 +23,7 @@ What the same agent gains when the phone clips onto the 2-servo legged body:
 
 | verb | kind | motion | args | hard limits (code-enforced) |
 |---|---|---|---|---|
-| `gesture` | atomic | yes | `steps: [{l, r, ms}]` | angles clamped in code to the file's soft band (the shipped walker file declares 50–130°, 90 = neutral; see SPEC-BODY-CONFIG §5 for the trim→band→min/max order); ms 120–2000 per step; whole gesture ≤3000 ms. Omit `l` or `r` in a step to hold that leg. **Free-authored** — the model invents the keyframes; named packs (wiggle/bow/sway) are few-shot examples, not the menu. |
+| `gesture` | atomic | yes | `steps: [{leg_l, leg_r, milliseconds}]` | angles clamped in code to the file's soft band (the shipped walker file declares 50–130°, 90 = neutral; see SPEC-BODY-CONFIG §5 for the trim→band→min/max order); milliseconds 120–2000 per step; whole gesture ≤3000 ms. Omit `leg_l` or `leg_r` in a step to hold that leg. **Free-authored** — the model invents the keyframes; named packs (wiggle/bow/sway) are few-shot examples, not the menu. |
 | `walk` | **policy** | yes | `secs: number` | 0.5–8 s. A trained balance policy (30 Hz against the IMU) owns the gait; the agent only decides *to travel* and for how long. |
 | `rest` | atomic | yes | — | both legs to neutral, then release (servos limp) |
 
@@ -33,11 +33,11 @@ Shipped as [`body_config.walker.json`](body_config.walker.json). Run the harness
 
 ## 2b. Four-servo walker (`body_config.walker4.json`)
 
-Adds `al`/`ar` on `gesture`, plus policy verb `arms(secs)`. `max_motion_verbs_per_tick` is 2, and the harness rejects two motion verbs that share a channel (`walk` + a leg `gesture` is illegal; `walk` + `arms` is legal).
+Adds `arm_l`/`arm_r` on `gesture`, plus policy verb `arms(secs)`. `max_motion_verbs_per_tick` is 2, and the harness rejects two motion verbs that share a channel (`walk` + a leg `gesture` is illegal; `walk` + `arms` is legal).
 
 | verb | kind | motion | args | hard limits (code-enforced) |
 |---|---|---|---|---|
-| `gesture` | atomic | yes | `steps: [{l, r, al, ar, ms}]` | same band 50–130; omit any key to hold that channel |
+| `gesture` | atomic | yes | `steps: [{leg_l, leg_r, arm_l, arm_r, milliseconds}]` | same band 50–130; omit any key to hold that channel |
 | `walk` | policy | yes | `secs` | legs only — `leg_l`, `leg_r` |
 | `arms` | policy | yes | `secs` | arms only — `arm_l`, `arm_r` |
 | `rest` | atomic | yes | — | all four to 90, then limp |
