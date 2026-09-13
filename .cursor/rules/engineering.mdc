@@ -1,0 +1,21 @@
+---
+description: Engineering invariants for the current repository
+alwaysApply: true
+---
+
+# Engineering invariants
+
+- Prefer a spec in this repo (`docs/**/*.md`, `AGENTS.md`, or `.cursor/specs/`) when one exists. If requirements are ambiguous, plan before coding.
+- Conventional Commits. No `git add .` / `git add -A`. Stage named paths.
+- Never `git push --force` (or `--force-with-lease`) to `main` or `master`.
+- Never commit `.env`, `*.pem`, `credentials.json`, key tabs, or registrar/password-manager exports.
+- Do not merge unless the user asked. Do not skip or delete CI jobs to go green.
+- Use `gh` for GitHub. Do not invent a second tracker.
+- Built-in Cursor skills to use, not recreate: `/review-bugbot`, `/review-security`, `/review`, `/babysit`, `/split-to-prs`.
+
+## Security (always)
+
+- Secrets, tokens, and API keys stay out of the repo, logs, and client bundles.
+- New endpoints need authn/authz; never trust client-supplied identity alone.
+- Guard injection (SQL, command, template), path traversal, and SSRF on user URLs.
+- Avoid dangerous defaults: open CORS, debug left on, unsigned redirects.
