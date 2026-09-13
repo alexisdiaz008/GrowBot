@@ -105,4 +105,4 @@ Safety machinery that is **engine-owned and never appears as verbs** (the agent 
 
 ## 7. The worked example
 
-[`body_config.phone.json`](body_config.phone.json) is the bare-phone body. Motor bodies: [`body_config.walker.json`](body_config.walker.json) (2-leg) and [`body_config.walker4.json`](body_config.walker4.json) (legs + arms). Pins are not in these files; see [`docs/spec-rails.md`](../docs/spec-rails.md). Firmware engines speak channel ids; the HTTP/relay edge translates wire aliases (`l`/`r`/`al`/`ar`).
+[`body_config.phone.json`](body_config.phone.json) is the bare-phone body. Motor bodies: [`body_config.walker.json`](body_config.walker.json) (2-leg) and [`body_config.walker4.json`](body_config.walker4.json) (legs + arms). Pins are not in these files; see [`docs/spec-rails.md`](../docs/spec-rails.md). Gesture steps use the same channel ids as firmware (`leg_l` / `leg_r` / `arm_l` / `arm_r`, duration `milliseconds`). N-servo `p:{}` stays the future shape; 2/4-servo now uses those ids directly.

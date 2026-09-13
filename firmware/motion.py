@@ -1,8 +1,7 @@
 """Shared body motion — the fat model both transports call.
 
-HTTP (`robot-server.py`) and relay (`relay_chip.py`) stay adapters: they parse
-the wire, then call this. Channel ids only; wire aliases are translated before
-enqueue. Pins/ports come from the injected channel_port map (PicoRobotics).
+HTTP and relay stay adapters: they parse JSON, then call this. Channel ids
+only. Pins/ports come from the injected channel_port map (PicoRobotics).
 """
 from act_engine import ActEngine, subset_steps_for_channels
 from channels import (
@@ -24,86 +23,63 @@ from channels import (
     ROUTINE_STRETCH,
     ROUTINE_WIGGLE,
     SERVO_NEUTRAL_DEGREES,
-    SETTLE_BEFORE_RELEASE_MILLISECONDS,
-    WIRE_LEFT_LEG,
-    WIRE_RIGHT_LEG,
     clamp_degrees_int,
+    loaded_channel_ids,
     normalize_enqueue_mode,
-    speed_to_degrees,
-    translate_wire_steps_to_channels,
-    wire_keys_for_channel_ports,
+    permit_pose,
+    permit_poses,
 )
 
 
 def canned_routines():
-    """Absolute-degree keyframes in *wire* aliases — translated at enqueue."""
+    """Absolute-degree keyframes in channel ids."""
     return {
         ROUTINE_WIGGLE: [
-            {WIRE_LEFT_LEG: 60, WIRE_RIGHT_LEG: 120, KEYFRAME_MILLISECONDS_KEY: 400},
-            {WIRE_LEFT_LEG: 120, WIRE_RIGHT_LEG: 60, KEYFRAME_MILLISECONDS_KEY: 400},
+            {CHANNEL_LEFT_LEG: 60, CHANNEL_RIGHT_LEG: 120, KEYFRAME_MILLISECONDS_KEY: 400},
+            {CHANNEL_LEFT_LEG: 120, CHANNEL_RIGHT_LEG: 60, KEYFRAME_MILLISECONDS_KEY: 400},
         ] * 2 + [
-            {WIRE_LEFT_LEG: SERVO_NEUTRAL_DEGREES, WIRE_RIGHT_LEG: SERVO_NEUTRAL_DEGREES,
+            {CHANNEL_LEFT_LEG: SERVO_NEUTRAL_DEGREES, CHANNEL_RIGHT_LEG: SERVO_NEUTRAL_DEGREES,
              KEYFRAME_MILLISECONDS_KEY: 300},
         ],
         ROUTINE_DANCE: [
-            {WIRE_LEFT_LEG: 50, WIRE_RIGHT_LEG: 50, KEYFRAME_MILLISECONDS_KEY: 700},
-            {WIRE_LEFT_LEG: 130, WIRE_RIGHT_LEG: 130, KEYFRAME_MILLISECONDS_KEY: 700},
-            {WIRE_LEFT_LEG: 55, WIRE_RIGHT_LEG: 125, KEYFRAME_MILLISECONDS_KEY: 260},
-            {WIRE_LEFT_LEG: 125, WIRE_RIGHT_LEG: 55, KEYFRAME_MILLISECONDS_KEY: 260},
-            {WIRE_LEFT_LEG: 55, WIRE_RIGHT_LEG: 125, KEYFRAME_MILLISECONDS_KEY: 260},
-            {WIRE_LEFT_LEG: 125, WIRE_RIGHT_LEG: 55, KEYFRAME_MILLISECONDS_KEY: 260},
-            {WIRE_LEFT_LEG: 150, WIRE_RIGHT_LEG: 150, KEYFRAME_MILLISECONDS_KEY: 700},
-            {WIRE_LEFT_LEG: SERVO_NEUTRAL_DEGREES, WIRE_RIGHT_LEG: SERVO_NEUTRAL_DEGREES,
+            {CHANNEL_LEFT_LEG: 50, CHANNEL_RIGHT_LEG: 50, KEYFRAME_MILLISECONDS_KEY: 700},
+            {CHANNEL_LEFT_LEG: 130, CHANNEL_RIGHT_LEG: 130, KEYFRAME_MILLISECONDS_KEY: 700},
+            {CHANNEL_LEFT_LEG: 55, CHANNEL_RIGHT_LEG: 125, KEYFRAME_MILLISECONDS_KEY: 260},
+            {CHANNEL_LEFT_LEG: 125, CHANNEL_RIGHT_LEG: 55, KEYFRAME_MILLISECONDS_KEY: 260},
+            {CHANNEL_LEFT_LEG: 55, CHANNEL_RIGHT_LEG: 125, KEYFRAME_MILLISECONDS_KEY: 260},
+            {CHANNEL_LEFT_LEG: 125, CHANNEL_RIGHT_LEG: 55, KEYFRAME_MILLISECONDS_KEY: 260},
+            {CHANNEL_LEFT_LEG: 150, CHANNEL_RIGHT_LEG: 150, KEYFRAME_MILLISECONDS_KEY: 700},
+            {CHANNEL_LEFT_LEG: SERVO_NEUTRAL_DEGREES, CHANNEL_RIGHT_LEG: SERVO_NEUTRAL_DEGREES,
              KEYFRAME_MILLISECONDS_KEY: 250},
-            {WIRE_LEFT_LEG: 40, WIRE_RIGHT_LEG: 40, KEYFRAME_MILLISECONDS_KEY: 500},
+            {CHANNEL_LEFT_LEG: 40, CHANNEL_RIGHT_LEG: 40, KEYFRAME_MILLISECONDS_KEY: 500},
         ],
         ROUTINE_SHIMMY: [
-            {WIRE_LEFT_LEG: 75, WIRE_RIGHT_LEG: 105, KEYFRAME_MILLISECONDS_KEY: 180},
-            {WIRE_LEFT_LEG: 105, WIRE_RIGHT_LEG: 75, KEYFRAME_MILLISECONDS_KEY: 180},
+            {CHANNEL_LEFT_LEG: 75, CHANNEL_RIGHT_LEG: 105, KEYFRAME_MILLISECONDS_KEY: 180},
+            {CHANNEL_LEFT_LEG: 105, CHANNEL_RIGHT_LEG: 75, KEYFRAME_MILLISECONDS_KEY: 180},
         ] * 4 + [
-            {WIRE_LEFT_LEG: SERVO_NEUTRAL_DEGREES, WIRE_RIGHT_LEG: SERVO_NEUTRAL_DEGREES,
+            {CHANNEL_LEFT_LEG: SERVO_NEUTRAL_DEGREES, CHANNEL_RIGHT_LEG: SERVO_NEUTRAL_DEGREES,
              KEYFRAME_MILLISECONDS_KEY: 250},
         ],
         ROUTINE_MARCH: [
-            {WIRE_LEFT_LEG: 45, WIRE_RIGHT_LEG: 135, KEYFRAME_MILLISECONDS_KEY: 340},
-            {WIRE_LEFT_LEG: 135, WIRE_RIGHT_LEG: 45, KEYFRAME_MILLISECONDS_KEY: 340},
+            {CHANNEL_LEFT_LEG: 45, CHANNEL_RIGHT_LEG: 135, KEYFRAME_MILLISECONDS_KEY: 340},
+            {CHANNEL_LEFT_LEG: 135, CHANNEL_RIGHT_LEG: 45, KEYFRAME_MILLISECONDS_KEY: 340},
         ] * 3 + [
-            {WIRE_LEFT_LEG: SERVO_NEUTRAL_DEGREES, WIRE_RIGHT_LEG: SERVO_NEUTRAL_DEGREES,
+            {CHANNEL_LEFT_LEG: SERVO_NEUTRAL_DEGREES, CHANNEL_RIGHT_LEG: SERVO_NEUTRAL_DEGREES,
              KEYFRAME_MILLISECONDS_KEY: 300},
         ],
         ROUTINE_BOW: [
-            {WIRE_LEFT_LEG: 150, WIRE_RIGHT_LEG: 150, KEYFRAME_MILLISECONDS_KEY: 600},
-            {WIRE_LEFT_LEG: 150, WIRE_RIGHT_LEG: 150, KEYFRAME_MILLISECONDS_KEY: 450},
-            {WIRE_LEFT_LEG: SERVO_NEUTRAL_DEGREES, WIRE_RIGHT_LEG: SERVO_NEUTRAL_DEGREES,
+            {CHANNEL_LEFT_LEG: 150, CHANNEL_RIGHT_LEG: 150, KEYFRAME_MILLISECONDS_KEY: 600},
+            {CHANNEL_LEFT_LEG: 150, CHANNEL_RIGHT_LEG: 150, KEYFRAME_MILLISECONDS_KEY: 450},
+            {CHANNEL_LEFT_LEG: SERVO_NEUTRAL_DEGREES, CHANNEL_RIGHT_LEG: SERVO_NEUTRAL_DEGREES,
              KEYFRAME_MILLISECONDS_KEY: 600},
         ],
         ROUTINE_STRETCH: [
-            {WIRE_LEFT_LEG: 30, WIRE_RIGHT_LEG: 30, KEYFRAME_MILLISECONDS_KEY: 700},
-            {WIRE_LEFT_LEG: 30, WIRE_RIGHT_LEG: 30, KEYFRAME_MILLISECONDS_KEY: 500},
-            {WIRE_LEFT_LEG: SERVO_NEUTRAL_DEGREES, WIRE_RIGHT_LEG: SERVO_NEUTRAL_DEGREES,
+            {CHANNEL_LEFT_LEG: 30, CHANNEL_RIGHT_LEG: 30, KEYFRAME_MILLISECONDS_KEY: 700},
+            {CHANNEL_LEFT_LEG: 30, CHANNEL_RIGHT_LEG: 30, KEYFRAME_MILLISECONDS_KEY: 500},
+            {CHANNEL_LEFT_LEG: SERVO_NEUTRAL_DEGREES, CHANNEL_RIGHT_LEG: SERVO_NEUTRAL_DEGREES,
              KEYFRAME_MILLISECONDS_KEY: 700},
         ],
     }
-
-
-def speed_steps_to_wire_keyframes(steps):
-    """/seq compatibility: v2 ±1 speed steps → absolute-degree wire keyframes."""
-    out = []
-    if not isinstance(steps, list):
-        return out
-    for step in steps:
-        try:
-            left_speed = float(step.get(WIRE_LEFT_LEG, 0))
-            right_speed = float(step.get(WIRE_RIGHT_LEG, 0))
-            milliseconds = int(step.get(KEYFRAME_MILLISECONDS_KEY, 400))
-            out.append({
-                WIRE_LEFT_LEG: speed_to_degrees(left_speed),
-                WIRE_RIGHT_LEG: speed_to_degrees(right_speed),
-                KEYFRAME_MILLISECONDS_KEY: milliseconds,
-            })
-        except (ValueError, TypeError, AttributeError):
-            continue
-    return out
 
 
 class BodyMotion:
@@ -138,6 +114,9 @@ class BodyMotion:
     def port_for(self, channel_id):
         return self.channel_port.get(channel_id)
 
+    def knows_channel(self, channel_id):
+        return channel_id in self.channel_port
+
     def write_pose(self, pose):
         for channel_id, degrees in pose.items():
             port = self.port_for(channel_id)
@@ -157,14 +136,6 @@ class BodyMotion:
     def release_all_mapped_ports(self):
         self.release_channels(tuple(self.channel_port.keys()), turn_led_off=True)
 
-    def write_leg_speeds(self, left_speed, right_speed):
-        left_port = self.port_for(CHANNEL_LEFT_LEG)
-        right_port = self.port_for(CHANNEL_RIGHT_LEG)
-        if left_port is not None:
-            self.board.servoWrite(left_port, speed_to_degrees(left_speed))
-        if right_port is not None:
-            self.board.servoWrite(right_port, speed_to_degrees(right_speed))
-
     def write_channel_degrees(self, channel_id, degrees):
         port = self.port_for(channel_id)
         if port is None:
@@ -172,15 +143,15 @@ class BodyMotion:
         self.board.servoWrite(port, clamp_degrees_int(degrees))
         return True
 
-    def enqueue_wire_steps(self, steps, mode=ENQUEUE_MODE_REPLACE):
-        """Translate wire keyframes, split across engines.
+    def enqueue_steps(self, steps, mode=ENQUEUE_MODE_REPLACE):
+        """Permit channel-id keyframes, split across engines.
 
         Arms-only does not clear walk. Returns (ok, queued_or_error, used_legs).
         """
         mode = normalize_enqueue_mode(mode)
-        translated = translate_wire_steps_to_channels(steps)
-        leg_steps = subset_steps_for_channels(translated, LEG_CHANNEL_IDS)
-        arm_steps = subset_steps_for_channels(translated, ARM_CHANNEL_IDS)
+        permitted = permit_poses(steps)
+        leg_steps = subset_steps_for_channels(permitted, LEG_CHANNEL_IDS)
+        arm_steps = subset_steps_for_channels(permitted, ARM_CHANNEL_IDS)
         if not leg_steps and not arm_steps:
             return False, ERROR_NO_VALID_KEYFRAMES, False
         if leg_steps:
@@ -197,7 +168,7 @@ class BodyMotion:
         frames = self.routines.get(name)
         if not frames:
             return False, None, False
-        return self.enqueue_wire_steps(frames, ENQUEUE_MODE_REPLACE)
+        return self.enqueue_steps(frames, ENQUEUE_MODE_REPLACE)
 
     def clear_legs(self):
         self.legs_engine.clear()
@@ -209,6 +180,10 @@ class BodyMotion:
         self.legs_engine.clear()
         self.arms_engine.clear()
 
+    def stop(self):
+        self.clear_both()
+        self.release_all_mapped_ports()
+
     def queued_milliseconds(self):
         return max(self.legs_engine.queued_milliseconds(),
                    self.arms_engine.queued_milliseconds())
@@ -216,51 +191,37 @@ class BodyMotion:
     def any_engine_active(self):
         return self.legs_engine.active or self.arms_engine.active
 
-    def loaded_wire_keys(self):
-        return wire_keys_for_channel_ports(self.channel_port)
+    def loaded_channel_ids(self):
+        return loaded_channel_ids(self.channel_port)
 
     def tick(self):
         self.legs_engine.tick()
         self.arms_engine.tick()
 
-    def quick_stop_legs(self):
-        """Immediate zero + release (for /set 0,0 and speed-mode dead-man)."""
-        self.write_leg_speeds(0, 0)
-        self.release_channels(LEG_CHANNEL_IDS)
-
     def quick_release_legs(self):
-        """Limp stop for pose mode (no recenter snap)."""
+        """Limp stop for pose/walk dead-man (no recenter snap)."""
         self.release_channels(LEG_CHANNEL_IDS)
 
-    def settle_then_release_all(self):
-        """Walk-speed /stop: recenter, pause, limp every mapped port."""
-        self.write_leg_speeds(0, 0)
-        if self.sleep_milliseconds:
-            self.sleep_milliseconds(SETTLE_BEFORE_RELEASE_MILLISECONDS)
-        self.release_all_mapped_ports()
-
-    def apply_absolute_pose(self, left_leg=None, right_leg=None,
-                            left_arm=None, right_arm=None):
-        """Instant pose. Missing pair = do not touch that engine.
+    def apply_sparse_pose(self, pose):
+        """Instant pose from a sparse channel-id map.
 
         Returns (touched_legs, touched_arms) so the adapter can manage dead-man.
         """
-        touched_legs = left_leg is not None or right_leg is not None
-        touched_arms = left_arm is not None or right_arm is not None
+        permitted = permit_pose(pose) or {}
+        touched_legs = any(channel_id in permitted for channel_id in LEG_CHANNEL_IDS)
+        touched_arms = any(channel_id in permitted for channel_id in ARM_CHANNEL_IDS)
         if touched_legs:
             self.clear_legs()
-            if left_leg is not None:
-                self.write_channel_degrees(CHANNEL_LEFT_LEG, left_leg)
-            if right_leg is not None:
-                self.write_channel_degrees(CHANNEL_RIGHT_LEG, right_leg)
+            for channel_id in LEG_CHANNEL_IDS:
+                if channel_id in permitted:
+                    self.write_channel_degrees(channel_id, permitted[channel_id])
             if self.led:
                 self.led.on()
         if touched_arms:
             self.clear_arms()
-            if left_arm is not None:
-                self.write_channel_degrees(CHANNEL_LEFT_ARM, left_arm)
-            if right_arm is not None:
-                self.write_channel_degrees(CHANNEL_RIGHT_ARM, right_arm)
+            for channel_id in ARM_CHANNEL_IDS:
+                if channel_id in permitted:
+                    self.write_channel_degrees(channel_id, permitted[channel_id])
             if self.led:
                 self.led.on()
         return touched_legs, touched_arms

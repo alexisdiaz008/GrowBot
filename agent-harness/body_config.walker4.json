@@ -3,7 +3,7 @@
   "version": 1,
   "id": "walker-4",
   "name": "phone on 2-servo legs + 2-servo arms",
-  "movement_guide": "You have two legs and two arms, all positional servos, 90 = neutral. Legs and arms are mirrors: unison means the pair sums to 180. {l:50, r:130} stands; {al:50, ar:130} raises both arms the same way. Omit a key to hold that channel. Walk owns the legs. Arms is a learned wave. You may walk and move arms in the same tick if the verbs do not share channels. A gesture that names l or r must not overlap a walk.",
+  "movement_guide": "You have two legs and two arms, all positional servos, 90 = neutral. Legs and arms are mirrors: unison means the pair sums to 180. {leg_l:50, leg_r:130} stands; {arm_l:50, arm_r:130} raises both arms the same way. Omit a key to hold that channel. Walk owns the legs. Arms is a learned wave. You may walk and move arms in the same tick if the verbs do not share channels. A gesture that names leg_l or leg_r must not overlap a walk.",
   "verbs": [
     {
       "v": "say",
@@ -42,14 +42,14 @@
         "steps": {
           "type": "array",
           "max_items": 8,
-          "optional": ["l", "r", "al", "ar"],
-          "items": { "l": [50, 130], "r": [50, 130], "al": [50, 130], "ar": [50, 130], "ms": [120, 2000] }
+          "optional": ["leg_l", "leg_r", "arm_l", "arm_r"],
+          "items": { "leg_l": [50, 130], "leg_r": [50, 130], "arm_l": [50, 130], "arm_r": [50, 130], "milliseconds": [120, 2000] }
         }
       },
-      "guide": "free-authored keyframes. Wire keys l/r = legs, al/ar = arms. Omit a key to hold it.",
+      "guide": "free-authored keyframes. Channel ids: leg_l/leg_r, arm_l/arm_r. Omit a key to hold it.",
       "examples": [
-        { "steps": [{ "al": 50, "ar": 130, "ms": 400 }, { "al": 90, "ar": 90, "ms": 300 }] },
-        { "steps": [{ "l": 60, "r": 120, "al": 50, "ar": 130, "ms": 500 }, { "l": 90, "r": 90, "al": 90, "ar": 90, "ms": 300 }] }
+        { "steps": [{ "arm_l": 50, "arm_r": 130, "milliseconds": 400 }, { "arm_l": 90, "arm_r": 90, "milliseconds": 300 }] },
+        { "steps": [{ "leg_l": 60, "leg_r": 120, "arm_l": 50, "arm_r": 130, "milliseconds": 500 }, { "leg_l": 90, "leg_r": 90, "arm_l": 90, "arm_r": 90, "milliseconds": 300 }] }
       ]
     },
     {
