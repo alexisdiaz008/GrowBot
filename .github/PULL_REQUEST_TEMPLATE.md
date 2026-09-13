@@ -14,3 +14,7 @@
 ## Size check
 
 - [ ] This is one focused change, roughly 300 lines or less (or I explained above why it has to be bigger)
+
+## Licensing
+
+- [ ] I have read the licensing section in CONTRIBUTING.md, the work is mine to give, and I grant the licence described there.

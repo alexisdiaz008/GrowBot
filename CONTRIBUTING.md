@@ -9,6 +9,31 @@ Thanks for wanting to help build GrowBot. This project runs on a small amount of
 - Open an issue before starting anything big, so we don't both build the same thing or head in a direction that won't merge.
 - Be kind and specific in reviews. "This breaks on an empty list at line 42" helps. "Fix this" does not.
 
+## Licensing your contribution
+
+Read this before you open a pull request. It is short.
+
+GrowBot is free and noncommercial for everyone: the code is under PolyForm Noncommercial 1.0.0,
+the hardware and docs under CC BY-NC 4.0. Commercial licences are sold separately, and that is
+what pays for the project.
+
+By opening a pull request, you confirm that:
+
+- **The work is yours to give.** You wrote it, or you otherwise have the right to contribute it,
+  and it does not contain code you are not allowed to license.
+- **You grant Brit Cruise (Art of the Problem) a perpetual, worldwide, irrevocable, royalty-free
+  licence** to use, modify and distribute your contribution, and to sublicense it under any
+  terms, including commercial ones.
+- **You keep your copyright.** This is a licence, not a handover. Your work stays yours and you
+  can use it anywhere else, however you like.
+
+Why this is here: if a contribution cannot be included in a commercial licence, it cannot ship
+in a kit or go into a classroom, which means it never reaches the people it was written for.
+This line keeps that door open without taking anything away from you.
+
+If you would rather not grant that, say so in the pull request instead of quietly skipping it.
+Plenty can still be merged, and we will work it out.
+
 ## How to contribute
 
 1. Fork the repo. You do not need push access, the fork is yours.
