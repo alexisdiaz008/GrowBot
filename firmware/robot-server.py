@@ -54,8 +54,13 @@ PRE-FLASH FOR SHIPPING = steps 2+3 (+ PicoRobotics.py) only — zero secrets on 
 """
 import network, socket, time, json, select
 from machine import Pin
+try:
+    from act_engine import ActEngine, subset_steps
+except ImportError:
+    print("MISSING act_engine.py — motors disabled")
+    while True:
+        time.sleep(1)
 import PicoRobotics
-from act_engine import ActEngine
 
 try:
     from secrets import ANTHROPIC_KEY
@@ -98,7 +103,9 @@ def _unquote(s):               # minimal form-urlencoded decoder
         i += 1
     return out
 
-L_PORT, R_PORT = 1, 3          # port 2 socket is dead
+CHANNEL_PORT = getattr(PicoRobotics, "CHANNEL_PORT", {"l": 1, "r": 3})
+L_PORT, R_PORT = CHANNEL_PORT["l"], CHANNEL_PORT["r"]
+LEG_CHS, ARM_CHS = ("l", "r"), ("al", "ar")
 DEAD_PORTS = (2,)
 MAX_STEP_MS, MAX_QUEUE_MS = 3000, 15000
 DEADMAN_MS = 500               # /set motion auto-stops after this much silence
@@ -114,35 +121,68 @@ def _speed(port, s):           # s: -1.0..1.0 -> angle 90 +/- 35
     s = max(-1.0, min(1.0, s))
     board.servoWrite(port, int(90 - s * 35))
 
+def _write_chs(pose):
+    for ch, deg in pose.items():
+        p = CHANNEL_PORT.get(ch)
+        if p is not None:
+            board.servoWrite(p, deg)
+    led.on()
+
+def _release_chs(chs, led_off=True):
+    for ch in chs:
+        p = CHANNEL_PORT.get(ch)
+        if p is not None:
+            _release(p)
+    if led_off:
+        led.off()
+
 def quick_stop():              # immediate zero + release (for /set 0,0 and dead-man)
     _speed(L_PORT, 0); _speed(R_PORT, 0)
-    _release(L_PORT); _release(R_PORT)
-    led.off()
+    _release_chs(LEG_CHS)
 
 def quick_release():           # limp stop for pose mode (no recenter snap)
-    _release(L_PORT); _release(R_PORT)
-    led.off()
+    _release_chs(LEG_CHS)
 
 def stop_all():                # settled stop for /stop and sequence end
     _speed(L_PORT, 0); _speed(R_PORT, 0)
     time.sleep_ms(300)
-    _release(L_PORT); _release(R_PORT)
-    led.off()
+    _release_chs(tuple(CHANNEL_PORT.keys()))
 
 state = {"moving_set": False, "last_set": 0, "last_arr": None,
          "set_n": 0, "deadman": 0, "pose_mode": False}
 dts = []                       # last DT_KEEP arrival deltas (ms) between /set+/pose calls
 
 def _parse_lr(query):
-    l = r = None
+    l = r = al = ar = None
     for kv in query.split("&"):
         k, _, v = kv.partition("=")
         try:
             if k == "l": l = float(v)
             elif k == "r": r = float(v)
+            elif k == "al": al = float(v)
+            elif k == "ar": ar = float(v)
         except ValueError:
             pass
-    return l, r
+    return l, r, al, ar
+
+def _enqueue_act(steps, mode):
+    """Split a plan across the legs/arms engines. Arms-only does not clear walk.
+    Returns (ok, queued_ms_or_err, used_legs)."""
+    mode = "append" if mode == "append" else "replace"
+    legs = subset_steps(steps, LEG_CHS)
+    arms = subset_steps(steps, ARM_CHS)
+    if not legs and not arms:
+        return False, "no valid keyframes", False
+    if legs:
+        ok, err = eng_legs.enqueue(legs, mode)
+        if not ok:
+            return False, err, True
+    if arms:
+        ok, err = eng_arms.enqueue(arms, mode)
+        if not ok:
+            return False, err, bool(legs)
+    q = max(eng_legs.queued_ms(), eng_arms.queued_ms())
+    return True, q, bool(legs)
 
 def _mark_arrival():
     now = time.ticks_ms()
@@ -156,10 +196,10 @@ def _mark_arrival():
     state["set_n"] += 1
 
 def apply_set(query):
-    l, r = _parse_lr(query)
+    l, r, _al, _ar = _parse_lr(query)
     l = l or 0.0; r = r or 0.0
     _mark_arrival()
-    eng.clear()                # manual control wins: drop queued chunks
+    eng_legs.clear()           # walk/manual owns legs only; arms keep gliding
     state["pose_mode"] = False
     if state["set_n"] % 50 == 0:
         print("set#%d l=%.2f r=%.2f dt=%sms" % (state["set_n"], l, r, dts[-1] if dts else "?"))
@@ -171,22 +211,35 @@ def apply_set(query):
         led.on()
         state["moving_set"] = True
 
-def apply_pose_vals(l, r):
+def apply_pose_vals(l, r, al=None, ar=None):
     _mark_arrival()
-    eng.clear()                # manual control wins: drop queued chunks
-    state["pose_mode"] = True
+    if l is not None or r is not None:
+        eng_legs.clear()       # walk/manual owns legs only
+        state["pose_mode"] = True
+        state["moving_set"] = True
+        led.on()
     if state["set_n"] % 50 == 0:
-        print("pose#%d l=%s r=%s dt=%sms" % (state["set_n"], l, r, dts[-1] if dts else "?"))
+        print("pose#%d l=%s r=%s al=%s ar=%s dt=%sms" % (
+            state["set_n"], l, r, al, ar, dts[-1] if dts else "?"))
     if l is not None:
         board.servoWrite(L_PORT, int(max(0, min(180, l))))
     if r is not None:
         board.servoWrite(R_PORT, int(max(0, min(180, r))))
-    led.on()
-    state["moving_set"] = True
+    if al is not None or ar is not None:
+        eng_arms.clear()
+        if al is not None:
+            p = CHANNEL_PORT.get("al")
+            if p is not None:
+                board.servoWrite(p, int(max(0, min(180, al))))
+        if ar is not None:
+            p = CHANNEL_PORT.get("ar")
+            if p is not None:
+                board.servoWrite(p, int(max(0, min(180, ar))))
+        led.on()
 
 def apply_pose(query):
-    l, r = _parse_lr(query)
-    apply_pose_vals(l, r)
+    l, r, al, ar = _parse_lr(query)
+    apply_pose_vals(l, r, al, ar)
 
 def stats_json(reset):
     d = sorted(dts)
@@ -194,7 +247,9 @@ def stats_json(reset):
         return d[min(len(d) - 1, int(f * (len(d) - 1) + 0.5))] if d else None
     out = json.dumps({"set_n": state["set_n"], "deadman": state["deadman"],
                       "ws_rx": ws["n"], "moving": state["moving_set"],
-                      "act": {"active": eng.active, "queued_ms": eng.queued_ms()},
+                      "act": {"active": eng_legs.active or eng_arms.active,
+                              "queued_ms": max(eng_legs.queued_ms(), eng_arms.queued_ms())},
+                      "channels": list(CHANNEL_PORT.keys()),
                       "up_s": time.ticks_diff(time.ticks_ms(), UP0) // 1000,
                       "dt_ms": {"n": len(d),
                                 "min": d[0] if d else None, "p50": pct(0.5),
@@ -235,13 +290,12 @@ def speed_to_keyframes(steps):
             continue
     return out
 
-def _act_write(l, r):          # the engine's hands: both legs + the LED heartbeat
-    board.servoWrite(L_PORT, l)
-    board.servoWrite(R_PORT, r)
-    led.on()
-
-eng = ActEngine(_act_write, quick_release, time.ticks_ms, time.ticks_diff,
-                max_step_ms=MAX_STEP_MS, max_queue_ms=MAX_QUEUE_MS)
+eng_legs = ActEngine(_write_chs, lambda: _release_chs(LEG_CHS),
+                     time.ticks_ms, time.ticks_diff, channels=LEG_CHS,
+                     max_step_ms=MAX_STEP_MS, max_queue_ms=MAX_QUEUE_MS)
+eng_arms = ActEngine(_write_chs, lambda: _release_chs(ARM_CHS, led_off=False),
+                     time.ticks_ms, time.ticks_diff, channels=ARM_CHS,
+                     max_step_ms=MAX_STEP_MS, max_queue_ms=MAX_QUEUE_MS)
 
 stop_all()
 
@@ -536,8 +590,9 @@ def ws_service():
             ws["n"] += 1
     if latest is not None:
         try:
-            l, _, r = latest.decode().partition(",")
-            apply_pose_vals(float(l), float(r))
+            parts = latest.decode().split(",")
+            if len(parts) >= 2:                 # two numbers only; ignore extra CSV fields
+                apply_pose_vals(float(parts[0]), float(parts[1]))
         except ValueError:
             pass
 
@@ -605,12 +660,13 @@ def handle(cl):
         return "set"
 
     if path == "/stop":
-        was_pose = state["pose_mode"] or eng.active
-        eng.clear()                             # drop queued chunks NOW
+        was_pose = state["pose_mode"] or eng_legs.active or eng_arms.active
+        eng_legs.clear()
+        eng_arms.clear()
         if was_pose:
-            quick_release()                     # limp, don't snap to center
+            _release_chs(tuple(CHANNEL_PORT.keys()))
         else:
-            stop_all()                          # speed mode: zero, settle, release
+            stop_all()
         state["moving_set"] = False
         state["pose_mode"] = False
         reply(cl, "200 OK", "stopped")
@@ -627,18 +683,20 @@ def handle(cl):
             mode = plan.get("mode", "replace")
         except Exception:
             steps, mode = None, "replace"
-        if not steps:
+        if not isinstance(steps, list) or not steps:
             reply(cl, "400 BR", '{"err":"bad act json"}', "application/json")
             return None
-        state["moving_set"] = False             # chunked motion has no dead-man
-        state["pose_mode"] = False
-        ok, res = eng.enqueue(steps, "append" if mode == "append" else "replace")
+        ok, res, used_legs = _enqueue_act(steps, mode)
+        if used_legs:                           # legs /act replaces walk; arms-only does not
+            state["moving_set"] = False         # chunked legs have no walk dead-man
+            state["pose_mode"] = False
         if ok:
             print("act: queued %dms (%s)" % (res, mode))
             reply(cl, "200 OK", '{"ok":1,"queued_ms":%d}' % res, "application/json")
         else:
+            qleft = max(eng_legs.queued_ms(), eng_arms.queued_ms())
             reply(cl, "409 Full" if res == "queue full" else "400 BR",
-                  '{"err":"%s","queued_ms":%d}' % (res, eng.queued_ms()),
+                  '{"err":"%s","queued_ms":%d}' % (res, qleft),
                   "application/json")
         return None
 
@@ -673,7 +731,7 @@ def handle(cl):
         if name in ROUTINES:
             state["moving_set"] = False
             state["pose_mode"] = False
-            ok, res = eng.enqueue(ROUTINES[name])   # absolute-degree keyframes
+            ok, res, _legs = _enqueue_act(ROUTINES[name], "replace")
             print("routine %s: queued %s" % (name, res))
             reply(cl, "200 OK", "routine %s queued (%sms)" % (name, res))
         else:
@@ -687,7 +745,7 @@ def handle(cl):
         if frames:
             state["moving_set"] = False
             state["pose_mode"] = False
-            ok, res = eng.enqueue(frames)
+            ok, res, _legs = _enqueue_act(frames, "replace")
             print("seq: %d steps -> %s" % (len(frames), res))
             if ok:
                 reply(cl, "200 OK", "queued %dms (%d steps)" % (res, len(frames)))
@@ -732,7 +790,8 @@ UP0 = time.ticks_ms()
 print("ready - v3: /act /set /pose /ws /stop /seq /routine /servo /stats")
 
 while True:
-    eng.tick()                 # play queued keyframes (~50Hz; poll below is 20ms)
+    eng_legs.tick()
+    eng_arms.tick()
     if state["moving_set"] and \
        time.ticks_diff(time.ticks_ms(), state["last_set"]) > DEADMAN_MS:
         if state["pose_mode"]:
@@ -759,7 +818,7 @@ while True:
             except Exception as e:
                 print("request error:", e)
                 try:
-                    if not state["moving_set"] and not eng.active: stop_all()
+                    if not state["moving_set"] and not eng_legs.active and not eng_arms.active: stop_all()
                 except Exception: pass
             finally:
                 if a != "ws":      # the ws socket must stay open

@@ -1,16 +1,16 @@
-# body_truth.json spec — the single source of body capability
+# body_config.json spec — the single source of body capability
 
 The agent never sees hardware. It sees a **menu of verbs**. The whole runtime contract is three pieces, readable by anyone:
 
 ```
-the agent emits verbs  →  body_truth defines the verbs  →  the actuator executes them
+the agent emits verbs  →  body_config defines the verbs  →  the actuator executes them
 ```
 
 Change the body file and the same agent drives a different body. A bodiless phone gets a short menu (`say`, `sound`, `sing`, `burst`); a legged rig adds motion verbs. **The agent logic does not change — only the body description does.** That is the design bet this whole kit exists to make portable.
 
 ## 1. Two faces, one file
 
-body_truth has two audiences and both live in the same file so they can never drift apart:
+body_config has two audiences and both live in the same file so they can never drift apart:
 
 - **Machine face** — arg schemas and hard limits. Code validates and clamps against these. For motor bodies, also the channel table (§6).
 - **LLM face** — `movement_guide` plus each verb's `guide` line and `examples`, rendered verbatim into the prompt.
@@ -24,7 +24,7 @@ Rules learned the hard way:
 
 ```jsonc
 {
-  "format": "growbot-body-truth",      // required, literal
+  "format": "growbot-body-config",      // required, literal
   "version": 1,
   "id": "phone-bare",                  // stable body id
   "name": "human-readable name",
@@ -64,11 +64,11 @@ Rejection vs clamping: an **off-menu verb or malformed call is rejected whole an
 - **atomic** — deterministic primitives: `say(text)`, `sing(notes)`, `gesture(steps)`, `lift_leg(which, amount)`. The actuator executes them directly.
 - **policy** — learned skills exposed as verbs with knobs: `walk(secs)`, `turn(gain)`. A trained controller (e.g. an evolved/RL walk policy running at 30 Hz against the IMU) owns the *how*; the agent only decides *that* and *how much*.
 
-**They are the same shape to the agent** — it cannot tell them apart, and must not need to. Sequential composition is free (`walk` then `gesture`). Concurrent blending — two verbs writing one actuator at once — is explicitly out of scope; don't design for it until you need it.
+**They are the same shape to the agent** — it cannot tell them apart, and must not need to. Sequential composition is free (`walk` then `gesture`). Concurrent verbs in one tick are allowed only when their **used channel sets are disjoint** (`walk` + arms-only `gesture`, or `walk` + `arms`). Two writers on the same channel in one tick are rejected.
 
 ## 5. The actuator contract
 
-The actuator is the **only** runtime consumer of body_truth. Pipeline, in order:
+The actuator is the **only** runtime consumer of body_config. Pipeline, in order:
 
 1. **Validate** the verb call against the menu (§3). Off-menu → reject + log.
 2. **Clamp** every arg. The prompt is advisory; **the clamp is authoritative and lives in code**. For LLM-authored motion (gestures), clamp in this order: per-channel trim, then the soft `band`, then hard `min`/`max` — trim applied after a clamp can escape it, so trim goes first. Policy verbs clamp only to hard travel; the trained controller owns smoothness inside it.
@@ -99,10 +99,10 @@ For anything with actuators, add the machine face as a channel table, and read t
 
 Safety machinery that is **engine-owned and never appears as verbs** (the agent can't invoke, skip, or override it): the dead-man stop (firmware neutrals the rig when the brain link goes silent), the duty budget, reflexes, and **boot-limp** — an uncalibrated rig must *never* auto-move on boot or connect; all channels stay released until a human explicitly energizes one during calibration.
 
-**Trust model — the part that is different from every other loadable artifact.** A downloaded personality is text; a downloaded policy is pure inference; a downloaded body_truth **commands real motors**, and your safety clamps clamp *to its declared limits*. A wrong or malicious file declaring `min:0, max:180` on a joint that mechanically stops at 40–120 makes a faithful harness drive the joint into its stop. **Clamping to attacker-supplied bounds is not a safety control.** Any body_truth you did not measure yourself goes through a calibrate-and-confirm-limits pass on the local rig — limits re-derived locally, never trusted from the file — before it may command motion.
+**Trust model — the part that is different from every other loadable artifact.** A downloaded personality is text; a downloaded policy is pure inference; a downloaded body_config **commands real motors**, and your safety clamps clamp *to its declared limits*. A wrong or malicious file declaring `min:0, max:180` on a joint that mechanically stops at 40–120 makes a faithful harness drive the joint into its stop. **Clamping to attacker-supplied bounds is not a safety control.** Any body_config you did not measure yourself goes through a calibrate-and-confirm-limits pass on the local rig — limits re-derived locally, never trusted from the file — before it may command motion.
 
 **Power is the thing that actually changes with scale.** Two micro-servos run happily off a small 1S pack; the same wiring at N servos is a brownout machine (N stalling MG90S-class servos ≈ tens of amps). Above ~4 servos: separate servo supply/BEC sized from per-channel stall current, stagger multi-channel move starts (inrush), and bill duty in *servo-seconds* (channels × time), not wall-clock. A brownout also kills the rail your dead-man runs on — supply sizing is the mitigation, not the watchdog.
 
 ## 7. The worked example
 
-[`body_truth.phone.json`](body_truth.phone.json) is the bare-phone body: four atomic, motionless verbs (`say`, `sound`, `sing`, `burst`), a movement guide that frames sound and light *as* the creature's gesture space, few-shot `sing` examples, and no channel table. It is deliberately the smallest real body file — and it is the body the shipped product runs for most users. A verb menu for the 2-leg walker body appears in [VERBS.md](VERBS.md) §2 as a reference extension.
+[`body_config.phone.json`](body_config.phone.json) is the bare-phone body. Motor bodies: [`body_config.walker.json`](body_config.walker.json) (2-leg) and [`body_config.walker4.json`](body_config.walker4.json) (legs + arms). Pins are not in these files; see [`docs/spec-rails.md`](../docs/spec-rails.md).

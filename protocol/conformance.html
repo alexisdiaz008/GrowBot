@@ -131,6 +131,20 @@ const GROUPS = [
         ws.onerror = ()=>{ clearTimeout(t); finish('FAIL','socket error (wss cert? /ws not served? mixed content?)'); };
       })},
   ]},
+  { title:'Optional 4-servo body — arms (FAIL here is OK if you have no arm servos)', tests:[
+    { name:'arms-only act does not require legs', ep:'POST /act {al,ar}', run: async (b)=>{
+        const r = await http(b,'/act',{method:'POST',json:{steps:[{al:50,ar:130,ms:400}],mode:'replace'}});
+        const j = parse(r.text);
+        if(r.status!==200 || !j || j.ok!==1) return {state:'FAIL', detail:`expected 200 {ok:1}, got ${r.status} ${r.text.slice(0,120)}`};
+        if(r.ms>=800) return {state:'FAIL', detail:`server BLOCKED ${Math.round(r.ms)}ms — must reply immediately`};
+        return {state:'PASS', detail:`200 queued_ms=${j.queued_ms} · replied in ${Math.round(r.ms)}ms — legs should stay put, arms wave`};
+      }},
+    { name:'stop limps arms too', ep:'GET /stop', run: async (b)=>{
+        const r = await http(b,'/stop');
+        if(r.status!==200) return {state:'FAIL', detail:`status ${r.status}`};
+        return {state:'PASS', detail:`200 "${r.text.trim()}" — all mapped servos limp`};
+      }},
+  ]},
 ];
 
 function rowEl(name, ep){

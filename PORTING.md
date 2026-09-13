@@ -21,7 +21,7 @@ More than 2 servos, different limbs, a gripper? The protocol's `/servo` endpoint
 
 ## Direction 2: your brain, my body (or yours)
 
-The reverse mod: skip my hosted brain and run your own LLM. That is what [agent-harness/](agent-harness/) is for, a self-contained loop (zero dependencies, Node 18+) that works with any OpenRouter model, or fully local via Ollama and friends. It emits validated verbs against a `body_truth.json` file that describes whatever body you have. Swap the body file, same mind, different robot.
+The reverse mod: skip my hosted brain and run your own LLM. That is what [agent-harness/](agent-harness/) is for, a self-contained loop (zero dependencies, Node 18+) that works with any OpenRouter model, or fully local via Ollama and friends. It emits validated verbs against a `body_config.json` file that describes whatever body you have. Swap the body file, same mind, different robot.
 
 ## Show me
 
