@@ -26,11 +26,13 @@ Optional arms (same 180° servos): left arm signal **GP2**, right arm **GP3**, r
 3. Copy 3 files from `firmware/` onto it. In a terminal:
    ```
    mpremote cp PicoRobotics_gpio.py :PicoRobotics.py
+   mpremote cp channels.py          :channels.py
    mpremote cp act_engine.py        :act_engine.py
+   mpremote cp motion.py            :motion.py
    mpremote cp robot-server.py      :main.py
    mpremote reset
    ```
-   *(No terminal? Install the free **Thonny** app and copy those 3 files onto the Pico, same result.)*
+   *(No terminal? Install the free **Thonny** app and copy those files onto the Pico, same result.)*
 
    *(Using a Pico carrier board instead of direct-wire? Copy `PicoRobotics.py` instead of the `_gpio` variant.)*
 

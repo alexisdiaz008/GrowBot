@@ -28,7 +28,8 @@ clears any queued chunks the moment it arrives.
 
 Hardware: left leg = port 1, right leg = port 3. PORT 2 SOCKET IS DEAD.
 Legs verified POSITIONAL (SG90) 2026-06-11 via 10s hold test.
-Requires PicoRobotics.py and act_engine.py on the board. secrets.py is OPTIONAL.
+Requires PicoRobotics.py, channels.py, act_engine.py, and motion.py on the board.
+secrets.py is OPTIONAL.
 
 Wi-Fi — three sources, tried in order (shipped chips carry NO secrets):
   1. wifi.json on the chip   <- written by the out-of-box setup hotspot (below)
@@ -44,7 +45,7 @@ with no key on the chip. (./finish-key-rotation.sh still refreshes secrets.py.)
 
 FLASHING (plug the Pico into the Mac by USB first):
   1. open Terminal, then:  cd ~/Desktop/phone-body
-  2. mpremote cp act_engine.py :act_engine.py   <- the motion engine
+  2. mpremote cp channels.py act_engine.py motion.py :/
   3. mpremote cp robot-server.py :main.py    <- the firmware; runs at every power-on
   4. (dev bench only, optional) mpremote cp secrets.py :secrets.py
   5. mpremote reset                          <- reboots; prints IP, or enters setup mode
@@ -55,9 +56,28 @@ PRE-FLASH FOR SHIPPING = steps 2+3 (+ PicoRobotics.py) only — zero secrets on 
 import network, socket, time, json, select
 from machine import Pin
 try:
-    from act_engine import ActEngine, subset_steps
+    from channels import (
+        DEAD_MAN_MILLISECONDS,
+        ENQUEUE_MODE_REPLACE,
+        ERROR_QUEUE_FULL,
+        HTTP_BODY_STOPPED,
+        JSON_ACTIVE,
+        JSON_CHANNELS,
+        JSON_ERROR,
+        JSON_MODE,
+        JSON_OK,
+        JSON_QUEUED_MILLISECONDS,
+        JSON_STEPS,
+        UNUSED_KITRONIK_PORT,
+        WIRE_LEFT_ARM,
+        WIRE_LEFT_LEG,
+        WIRE_RIGHT_ARM,
+        WIRE_RIGHT_LEG,
+        clamp_degrees_int,
+    )
+    from motion import BodyMotion, speed_steps_to_wire_keyframes
 except ImportError:
-    print("MISSING act_engine.py — motors disabled")
+    print("MISSING channels.py / act_engine.py / motion.py — motors disabled")
     while True:
         time.sleep(1)
 import PicoRobotics
@@ -73,236 +93,215 @@ except Exception:
 # key on the Pico) instead of shipping the key to the browser.
 SERVED_KEY = ""
 
-def _load_wifi():
-    try:                       # 1) provisioned by the setup hotspot
-        with open("wifi.json") as f:
-            w = json.load(f)
-        if w.get("ssid"):
-            return w["ssid"], w.get("password", "")
+def load_wifi():
+    try:
+        with open("wifi.json") as wifi_file:
+            wifi_config = json.load(wifi_file)
+        if wifi_config.get("ssid"):
+            return wifi_config["ssid"], wifi_config.get("password", "")
     except Exception:
         pass
-    try:                       # 2) dev bench
+    try:
         import secrets
         return secrets.WIFI_SSID, secrets.WIFI_PASSWORD
     except Exception:
-        return None, None      # 3) -> setup mode
+        return None, None
 
-def _unquote(s):               # minimal form-urlencoded decoder
-    s = s.replace("+", " ")
+def unquote_form(encoded):
+    encoded = encoded.replace("+", " ")
     out = ""
-    i = 0
-    while i < len(s):
-        if s[i] == "%" and i + 3 <= len(s):
+    index = 0
+    while index < len(encoded):
+        if encoded[index] == "%" and index + 3 <= len(encoded):
             try:
-                out += chr(int(s[i + 1:i + 3], 16))
-                i += 3
+                out += chr(int(encoded[index + 1:index + 3], 16))
+                index += 3
                 continue
             except ValueError:
                 pass
-        out += s[i]
-        i += 1
+        out += encoded[index]
+        index += 1
     return out
 
-CHANNEL_PORT = getattr(PicoRobotics, "CHANNEL_PORT", {"l": 1, "r": 3})
-L_PORT, R_PORT = CHANNEL_PORT["l"], CHANNEL_PORT["r"]
-LEG_CHS, ARM_CHS = ("l", "r"), ("al", "ar")
-DEAD_PORTS = (2,)
-MAX_STEP_MS, MAX_QUEUE_MS = 3000, 15000
-DEADMAN_MS = 500               # /set motion auto-stops after this much silence
-DT_KEEP = 120                  # ring buffer of /set arrival deltas
+PATH_ROOT = "/"
+PATH_SET = "/set"
+PATH_POSE = "/pose"
+PATH_STOP = "/stop"
+PATH_STATS = "/stats"
+PATH_ACT = "/act"
+PATH_WEBSOCKET = "/ws"
+PATH_ROUTINE = "/routine"
+PATH_SEQ = "/seq"
+PATH_SERVO = "/servo"
+
+HTTP_STATUS_OK = "200 OK"
+HTTP_STATUS_NO_CONTENT = "204 No Content"
+HTTP_STATUS_BAD_REQUEST = "400 Bad Request"
+HTTP_STATUS_NOT_FOUND = "404 Not Found"
+HTTP_STATUS_CONFLICT = "409 Conflict"
+HTTP_STATUS_NOT_IMPLEMENTED = "501 Not Implemented"
+HTTP_STATUS_SWITCHING_PROTOCOLS = "101 Switching Protocols"
+
+CONTENT_TYPE_TEXT = "text/plain"
+CONTENT_TYPE_JSON = "application/json"
+CONTENT_TYPE_HTML = "text/html"
+
+METHOD_GET = "GET"
+METHOD_POST = "POST"
+METHOD_OPTIONS = "OPTIONS"
+
+HANDLE_RESULT_SET = "set"
+HANDLE_RESULT_STOP = "stop"
+HANDLE_RESULT_WEBSOCKET = "ws"
+
+QUERY_ROUTINE_NAME = "name="
+QUERY_STATS_RESET = "reset"
+QUERY_SERVO_PORT = "p"
+QUERY_SERVO_DEGREES = "deg"
+QUERY_SERVO_OFF = "off"
+
+SERVO_PORT_MIN = 1
+SERVO_PORT_MAX = 8
+ARRIVAL_DELTA_RING_SIZE = 120
+LOG_EVERY_N_MANUAL_COMMANDS = 50
+SERVO_PWM_PERIOD_MILLISECONDS = 20
+WIFI_POWER_MANAGEMENT_NO_POWERSAVE = 0xa11140
 
 board = PicoRobotics.KitronikPicoRobotics()
 led = Pin("LED", Pin.OUT)
+motion = BodyMotion(
+    board, PicoRobotics.CHANNEL_PORT,
+    time.ticks_ms, time.ticks_diff,
+    led=led, sleep_milliseconds=time.sleep_ms,
+)
 
-def _release(port):
-    board.i2c.writeto_mem(108, 0x08 + (port - 1) * 4 + 3, bytes([0x10]))
+state = {
+    "moving_set": False,
+    "last_set": 0,
+    "last_arr": None,
+    "set_n": 0,
+    "deadman": 0,
+    "pose_mode": False,
+}
+arrival_deltas_milliseconds = []
 
-def _speed(port, s):           # s: -1.0..1.0 -> angle 90 +/- 35
-    s = max(-1.0, min(1.0, s))
-    board.servoWrite(port, int(90 - s * 35))
 
-def _write_chs(pose):
-    for ch, deg in pose.items():
-        p = CHANNEL_PORT.get(ch)
-        if p is not None:
-            board.servoWrite(p, deg)
-    led.on()
-
-def _release_chs(chs, led_off=True):
-    for ch in chs:
-        p = CHANNEL_PORT.get(ch)
-        if p is not None:
-            _release(p)
-    if led_off:
-        led.off()
-
-def quick_stop():              # immediate zero + release (for /set 0,0 and dead-man)
-    _speed(L_PORT, 0); _speed(R_PORT, 0)
-    _release_chs(LEG_CHS)
-
-def quick_release():           # limp stop for pose mode (no recenter snap)
-    _release_chs(LEG_CHS)
-
-def stop_all():                # settled stop for /stop and sequence end
-    _speed(L_PORT, 0); _speed(R_PORT, 0)
-    time.sleep_ms(300)
-    _release_chs(tuple(CHANNEL_PORT.keys()))
-
-state = {"moving_set": False, "last_set": 0, "last_arr": None,
-         "set_n": 0, "deadman": 0, "pose_mode": False}
-dts = []                       # last DT_KEEP arrival deltas (ms) between /set+/pose calls
-
-def _parse_lr(query):
-    l = r = al = ar = None
-    for kv in query.split("&"):
-        k, _, v = kv.partition("=")
+def parse_channel_query(query):
+    values = {
+        WIRE_LEFT_LEG: None,
+        WIRE_RIGHT_LEG: None,
+        WIRE_LEFT_ARM: None,
+        WIRE_RIGHT_ARM: None,
+    }
+    for pair in query.split("&"):
+        key, _, raw = pair.partition("=")
+        if key not in values:
+            continue
         try:
-            if k == "l": l = float(v)
-            elif k == "r": r = float(v)
-            elif k == "al": al = float(v)
-            elif k == "ar": ar = float(v)
+            values[key] = float(raw)
         except ValueError:
             pass
-    return l, r, al, ar
+    return (
+        values[WIRE_LEFT_LEG],
+        values[WIRE_RIGHT_LEG],
+        values[WIRE_LEFT_ARM],
+        values[WIRE_RIGHT_ARM],
+    )
 
-def _enqueue_act(steps, mode):
-    """Split a plan across the legs/arms engines. Arms-only does not clear walk.
-    Returns (ok, queued_ms_or_err, used_legs)."""
-    mode = "append" if mode == "append" else "replace"
-    legs = subset_steps(steps, LEG_CHS)
-    arms = subset_steps(steps, ARM_CHS)
-    if not legs and not arms:
-        return False, "no valid keyframes", False
-    if legs:
-        ok, err = eng_legs.enqueue(legs, mode)
-        if not ok:
-            return False, err, True
-    if arms:
-        ok, err = eng_arms.enqueue(arms, mode)
-        if not ok:
-            return False, err, bool(legs)
-    q = max(eng_legs.queued_ms(), eng_arms.queued_ms())
-    return True, q, bool(legs)
 
-def _mark_arrival():
+def mark_arrival():
     now = time.ticks_ms()
     if state["last_arr"] is not None:
-        d = time.ticks_diff(now, state["last_arr"])
-        dts.append(d)
-        if len(dts) > DT_KEEP:
-            dts.pop(0)
+        delta = time.ticks_diff(now, state["last_arr"])
+        arrival_deltas_milliseconds.append(delta)
+        if len(arrival_deltas_milliseconds) > ARRIVAL_DELTA_RING_SIZE:
+            arrival_deltas_milliseconds.pop(0)
     state["last_arr"] = now
     state["last_set"] = now
     state["set_n"] += 1
 
+
 def apply_set(query):
-    l, r, _al, _ar = _parse_lr(query)
-    l = l or 0.0; r = r or 0.0
-    _mark_arrival()
-    eng_legs.clear()           # walk/manual owns legs only; arms keep gliding
+    left_speed, right_speed, _left_arm, _right_arm = parse_channel_query(query)
+    left_speed = left_speed or 0.0
+    right_speed = right_speed or 0.0
+    mark_arrival()
+    motion.clear_legs()
     state["pose_mode"] = False
-    if state["set_n"] % 50 == 0:
-        print("set#%d l=%.2f r=%.2f dt=%sms" % (state["set_n"], l, r, dts[-1] if dts else "?"))
-    if l == 0 and r == 0:
-        quick_stop()
+    if state["set_n"] % LOG_EVERY_N_MANUAL_COMMANDS == 0:
+        last_delta = arrival_deltas_milliseconds[-1] if arrival_deltas_milliseconds else "?"
+        print("set#%d l=%.2f r=%.2f dt=%sms" % (state["set_n"], left_speed, right_speed, last_delta))
+    if left_speed == 0 and right_speed == 0:
+        motion.quick_stop_legs()
         state["moving_set"] = False
     else:
-        _speed(L_PORT, l); _speed(R_PORT, r)
+        motion.write_leg_speeds(left_speed, right_speed)
         led.on()
         state["moving_set"] = True
 
-def apply_pose_vals(l, r, al=None, ar=None):
-    _mark_arrival()
-    if l is not None or r is not None:
-        eng_legs.clear()       # walk/manual owns legs only
+
+def apply_pose_vals(left_leg, right_leg, left_arm=None, right_arm=None):
+    mark_arrival()
+    touched_legs, _touched_arms = motion.apply_absolute_pose(
+        left_leg, right_leg, left_arm, right_arm,
+    )
+    if touched_legs:
         state["pose_mode"] = True
         state["moving_set"] = True
-        led.on()
-    if state["set_n"] % 50 == 0:
+    if state["set_n"] % LOG_EVERY_N_MANUAL_COMMANDS == 0:
+        last_delta = arrival_deltas_milliseconds[-1] if arrival_deltas_milliseconds else "?"
         print("pose#%d l=%s r=%s al=%s ar=%s dt=%sms" % (
-            state["set_n"], l, r, al, ar, dts[-1] if dts else "?"))
-    if l is not None:
-        board.servoWrite(L_PORT, int(max(0, min(180, l))))
-    if r is not None:
-        board.servoWrite(R_PORT, int(max(0, min(180, r))))
-    if al is not None or ar is not None:
-        eng_arms.clear()
-        if al is not None:
-            p = CHANNEL_PORT.get("al")
-            if p is not None:
-                board.servoWrite(p, int(max(0, min(180, al))))
-        if ar is not None:
-            p = CHANNEL_PORT.get("ar")
-            if p is not None:
-                board.servoWrite(p, int(max(0, min(180, ar))))
-        led.on()
+            state["set_n"], left_leg, right_leg, left_arm, right_arm, last_delta))
+
 
 def apply_pose(query):
-    l, r, al, ar = _parse_lr(query)
-    apply_pose_vals(l, r, al, ar)
+    left_leg, right_leg, left_arm, right_arm = parse_channel_query(query)
+    apply_pose_vals(left_leg, right_leg, left_arm, right_arm)
+
 
 def stats_json(reset):
-    d = sorted(dts)
-    def pct(f):
-        return d[min(len(d) - 1, int(f * (len(d) - 1) + 0.5))] if d else None
-    out = json.dumps({"set_n": state["set_n"], "deadman": state["deadman"],
-                      "ws_rx": ws["n"], "moving": state["moving_set"],
-                      "act": {"active": eng_legs.active or eng_arms.active,
-                              "queued_ms": max(eng_legs.queued_ms(), eng_arms.queued_ms())},
-                      "channels": list(CHANNEL_PORT.keys()),
-                      "up_s": time.ticks_diff(time.ticks_ms(), UP0) // 1000,
-                      "dt_ms": {"n": len(d),
-                                "min": d[0] if d else None, "p50": pct(0.5),
-                                "p90": pct(0.9), "p99": pct(0.99),
-                                "max": d[-1] if d else None}})
+    deltas = sorted(arrival_deltas_milliseconds)
+
+    def percentile(fraction):
+        if not deltas:
+            return None
+        index = min(len(deltas) - 1, int(fraction * (len(deltas) - 1) + 0.5))
+        return deltas[index]
+
+    out = json.dumps({
+        "set_n": state["set_n"],
+        "deadman": state["deadman"],
+        "ws_rx": websocket_state["frames_received"],
+        "moving": state["moving_set"],
+        "act": {
+            JSON_ACTIVE: motion.any_engine_active(),
+            JSON_QUEUED_MILLISECONDS: motion.queued_milliseconds(),
+        },
+        JSON_CHANNELS: motion.loaded_wire_keys(),
+        "up_s": time.ticks_diff(time.ticks_ms(), UP0) // 1000,
+        "dt_ms": {
+            "n": len(deltas),
+            "min": deltas[0] if deltas else None,
+            "p50": percentile(0.5),
+            "p90": percentile(0.9),
+            "p99": percentile(0.99),
+            "max": deltas[-1] if deltas else None,
+        },
+    })
     if reset:
-        del dts[:]
+        del arrival_deltas_milliseconds[:]
         state["set_n"] = 0
         state["last_arr"] = None
         state["deadman"] = 0
     return out
 
-# Routines are ABSOLUTE-DEGREE keyframes now (legs are positional, full 0-180).
-# 90 = straight down / neutral. These use the wide range to show off real poses.
-ROUTINES = {
-    "wiggle": [{"l":60,"r":120,"ms":400},{"l":120,"r":60,"ms":400}]*2 + [{"l":90,"r":90,"ms":300}],
-    "dance":  [{"l":50,"r":50,"ms":700},{"l":130,"r":130,"ms":700},
-               {"l":55,"r":125,"ms":260},{"l":125,"r":55,"ms":260},
-               {"l":55,"r":125,"ms":260},{"l":125,"r":55,"ms":260},
-               {"l":150,"r":150,"ms":700},{"l":90,"r":90,"ms":250},{"l":40,"r":40,"ms":500}],
-    "shimmy": [{"l":75,"r":105,"ms":180},{"l":105,"r":75,"ms":180}]*4 + [{"l":90,"r":90,"ms":250}],
-    "march":  [{"l":45,"r":135,"ms":340},{"l":135,"r":45,"ms":340}]*3 + [{"l":90,"r":90,"ms":300}],
-    "bow":    [{"l":150,"r":150,"ms":600},{"l":150,"r":150,"ms":450},{"l":90,"r":90,"ms":600}],
-    "stretch":[{"l":30,"r":30,"ms":700},{"l":30,"r":30,"ms":500},{"l":90,"r":90,"ms":700}],
-}
 
-def speed_to_keyframes(steps):
-    """/seq compatibility shim: the v2 creature app still POSTs ±1 'speed' steps.
-    Map them to lean angles (90 - s*35) so old clients keep working. New code
-    (routines, LLM, /act, /pose) speaks absolute 0-180 degrees directly."""
-    out = []
-    for st in steps:
-        try:
-            out.append({"l": 90 - max(-1.0, min(1.0, float(st.get("l", 0)))) * 35,
-                        "r": 90 - max(-1.0, min(1.0, float(st.get("r", 0)))) * 35,
-                        "ms": int(st.get("ms", 400))})
-        except (ValueError, TypeError, AttributeError):
-            continue
-    return out
-
-eng_legs = ActEngine(_write_chs, lambda: _release_chs(LEG_CHS),
-                     time.ticks_ms, time.ticks_diff, channels=LEG_CHS,
-                     max_step_ms=MAX_STEP_MS, max_queue_ms=MAX_QUEUE_MS)
-eng_arms = ActEngine(_write_chs, lambda: _release_chs(ARM_CHS, led_off=False),
-                     time.ticks_ms, time.ticks_diff, channels=ARM_CHS,
-                     max_step_ms=MAX_STEP_MS, max_queue_ms=MAX_QUEUE_MS)
-
-stop_all()
+motion.settle_then_release_all()
 
 # ---------- Wi-Fi (ladder: wifi.json -> secrets.py -> setup hotspot) ----------
 wlan = network.WLAN(network.STA_IF)
 wlan.active(True)
-wlan.config(pm=0xa11140)
+wlan.config(pm=WIFI_POWER_MANAGEMENT_NO_POWERSAVE)
 
 SETUP_PAGE = ("<!DOCTYPE html><html><head><meta charset=utf-8><meta name=viewport "
   'content="width=device-width,initial-scale=1"><title>GrowBot setup</title><style>'
@@ -370,7 +369,7 @@ def setup_mode():
                 form = {}
                 for kv in body.decode().split("&"):
                     k, _, v = kv.partition("=")
-                    form[k] = _unquote(v)
+                    form[k] = unquote_form(v)
                 ssid = (form.get("ssid") or form.get("ssid2") or "").strip()
                 if ssid:
                     with open("wifi.json", "w") as f:
@@ -392,7 +391,7 @@ def setup_mode():
             try: cl.close()
             except Exception: pass
 
-SSID, PASSWORD = _load_wifi()
+SSID, PASSWORD = load_wifi()
 joined = False
 if SSID:
     wlan.connect(SSID, PASSWORD)
@@ -494,345 +493,401 @@ function mic(){
 # ---------- WebSocket (persistent /pose stream) ----------
 try:
     import hashlib, binascii
-    WS_OK = hasattr(hashlib, "sha1")
+    WEBSOCKET_AVAILABLE = hasattr(hashlib, "sha1")
 except ImportError:
-    WS_OK = False
-WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-ws = {"sock": None, "buf": b"", "n": 0}
+    WEBSOCKET_AVAILABLE = False
+WEBSOCKET_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+WEBSOCKET_OPCODE_CLOSE = 8
+WEBSOCKET_OPCODE_PING = 9
+WEBSOCKET_OPCODE_PONG = 10
+WEBSOCKET_OPCODE_TEXT = 1
+WEBSOCKET_OPCODE_BINARY = 2
+WEBSOCKET_BUFFER_LIMIT = 4096
+WEBSOCKET_RECV_CHUNK = 512
+HTTP_RECV_CHUNK = 512
+HTTP_RECV_INITIAL = 2048
+HTTP_RECV_MAX = 8192
+WEBSOCKET_LENGTH_16BIT = 126
+WEBSOCKET_LENGTH_64BIT = 127
 
-def _ws_frame(op, payload=b""):       # server->client frame (unmasked)
-    ln = len(payload)
-    if ln < 126:
-        return bytes([0x80 | op, ln]) + payload
-    return bytes([0x80 | op, 126, ln >> 8, ln & 0xFF]) + payload
+websocket_state = {"socket": None, "buffer": b"", "frames_received": 0}
 
-def _ws_pop_frame():
-    """Pop one complete frame off ws['buf']; None if incomplete."""
-    buf = ws["buf"]
-    if len(buf) < 2:
+def websocket_frame(opcode, payload=b""):
+    length = len(payload)
+    if length < WEBSOCKET_LENGTH_16BIT:
+        return bytes([0x80 | opcode, length]) + payload
+    return bytes([0x80 | opcode, WEBSOCKET_LENGTH_16BIT, length >> 8, length & 0xFF]) + payload
+
+def websocket_pop_frame():
+    buffer = websocket_state["buffer"]
+    if len(buffer) < 2:
         return None
-    op = buf[0] & 0x0F
-    masked = buf[1] & 0x80
-    ln = buf[1] & 0x7F
-    i = 2
-    if ln == 126:
-        if len(buf) < 4:
+    opcode = buffer[0] & 0x0F
+    masked = buffer[1] & 0x80
+    length = buffer[1] & 0x7F
+    header_end = 2
+    if length == WEBSOCKET_LENGTH_16BIT:
+        if len(buffer) < 4:
             return None
-        ln = (buf[2] << 8) | buf[3]
-        i = 4
-    elif ln == 127:                   # 64-bit length: never legit here
-        ws["buf"] = b""
+        length = (buffer[2] << 8) | buffer[3]
+        header_end = 4
+    elif length == WEBSOCKET_LENGTH_64BIT:
+        websocket_state["buffer"] = b""
         return None
     mask = None
     if masked:
-        if len(buf) < i + 4:
+        if len(buffer) < header_end + 4:
             return None
-        mask = buf[i:i + 4]
-        i += 4
-    if len(buf) < i + ln:
+        mask = buffer[header_end:header_end + 4]
+        header_end += 4
+    if len(buffer) < header_end + length:
         return None
-    payload = bytearray(buf[i:i + ln])
+    payload = bytearray(buffer[header_end:header_end + length])
     if mask:
-        for j in range(ln):
-            payload[j] ^= mask[j & 3]
-    ws["buf"] = buf[i + ln:]
-    return op, bytes(payload)
+        for index in range(length):
+            payload[index] ^= mask[index & 3]
+    websocket_state["buffer"] = buffer[header_end + length:]
+    return opcode, bytes(payload)
 
-def ws_close(reason=""):
-    s = ws["sock"]
-    if not s:
+def websocket_close(reason=""):
+    sock = websocket_state["socket"]
+    if not sock:
         return
-    try: poller.unregister(s)
-    except Exception: pass
-    try: s.close()
-    except Exception: pass
-    ws["sock"] = None
-    ws["buf"] = b""
-    if state["moving_set"]:           # stream died mid-motion -> go limp
-        quick_release()
+    try:
+        poller.unregister(sock)
+    except Exception:
+        pass
+    try:
+        sock.close()
+    except Exception:
+        pass
+    websocket_state["socket"] = None
+    websocket_state["buffer"] = b""
+    if state["moving_set"]:
+        motion.quick_release_legs()
         state["moving_set"] = False
         state["pose_mode"] = False
     print("ws closed:", reason)
 
-def ws_service():
+def websocket_service():
     """Drain all pending frames, apply ONLY the newest pose (latest-wins)."""
-    s = ws["sock"]
+    sock = websocket_state["socket"]
     try:
         while True:
-            data = s.recv(512)
+            data = sock.recv(WEBSOCKET_RECV_CHUNK)
             if data == b"":
-                ws_close("peer gone")
+                websocket_close("peer gone")
                 return
-            ws["buf"] += data
-            if len(data) < 512:
+            websocket_state["buffer"] += data
+            if len(data) < WEBSOCKET_RECV_CHUNK:
                 break
-    except OSError:                   # EAGAIN: nothing more queued
+    except OSError:
         pass
-    if len(ws["buf"]) > 4096:
-        ws_close("buffer overflow")
+    if len(websocket_state["buffer"]) > WEBSOCKET_BUFFER_LIMIT:
+        websocket_close("buffer overflow")
         return
     latest = None
     while True:
-        f = _ws_pop_frame()
-        if f is None:
+        frame = websocket_pop_frame()
+        if frame is None:
             break
-        op, payload = f
-        if op == 8:                   # close
-            try: s.send(_ws_frame(8))
-            except OSError: pass
-            ws_close("client close")
+        opcode, payload = frame
+        if opcode == WEBSOCKET_OPCODE_CLOSE:
+            try:
+                sock.send(websocket_frame(WEBSOCKET_OPCODE_CLOSE))
+            except OSError:
+                pass
+            websocket_close("client close")
             return
-        if op == 9:                   # ping -> pong
-            try: s.send(_ws_frame(10, payload))
-            except OSError: pass
-        elif op in (1, 2):
+        if opcode == WEBSOCKET_OPCODE_PING:
+            try:
+                sock.send(websocket_frame(WEBSOCKET_OPCODE_PONG, payload))
+            except OSError:
+                pass
+        elif opcode in (WEBSOCKET_OPCODE_TEXT, WEBSOCKET_OPCODE_BINARY):
             latest = payload
-            ws["n"] += 1
+            websocket_state["frames_received"] += 1
     if latest is not None:
         try:
             parts = latest.decode().split(",")
-            if len(parts) >= 2:                 # two numbers only; ignore extra CSV fields
+            if len(parts) >= 2:
                 apply_pose_vals(float(parts[0]), float(parts[1]))
         except ValueError:
             pass
 
-# ---------- tiny HTTP server ----------
-CORS = "Access-Control-Allow-Origin: *\r\n"
+CORS_HEADER = "Access-Control-Allow-Origin: *\r\n"
+ERROR_BAD_ACT_JSON = "bad act json"
+ERROR_BAD_STEPS_JSON = "bad steps json"
+ERROR_UNKNOWN_ROUTINE = "unknown routine"
+ERROR_BAD_PORT = "bad port (1-8, port 2 is dead)"
+ERROR_NEED_DEG_OR_OFF = "need deg= or off=1"
+ERROR_NOT_WEBSOCKET = "not a websocket upgrade"
+ERROR_NO_SHA1 = "no sha1 in this firmware build"
+HTTP_BODY_OK = JSON_OK
+HTTP_BODY_NOPE = "nope"
+QUERY_OFF_FALSE_VALUES = ("0", "")
+JSON_OK_FLAG = 1
+POLL_MILLISECONDS = SERVO_PWM_PERIOD_MILLISECONDS
+HTTP_LISTEN_BACKLOG = 4
+HTTP_PORT = 80
+BIND_ALL_INTERFACES = "0.0.0.0"
 
-def send_all(c, data):
-    if isinstance(data, str): data = data.encode()
+
+def send_all(client, data):
+    if isinstance(data, str):
+        data = data.encode()
     while data:
-        n = c.send(data); data = data[n:]
+        sent = client.send(data)
+        data = data[sent:]
 
-def reply(cl, status, body_txt, ctype="text/plain"):
-    send_all(cl, "HTTP/1.1 %s\r\n%sContent-Type: %s\r\nConnection: close\r\n\r\n"
-                 % (status, CORS, ctype))
-    send_all(cl, body_txt)
 
-def read_request(cl, timeout=0.5):     # short: a stalled client must not freeze a glide
-    cl.settimeout(timeout)
-    req = cl.recv(2048)
-    if not req:
+def reply(client, status, body_text, content_type=CONTENT_TYPE_TEXT):
+    send_all(client, "HTTP/1.1 %s\r\n%sContent-Type: %s\r\nConnection: close\r\n\r\n"
+             % (status, CORS_HEADER, content_type))
+    send_all(client, body_text)
+
+
+def act_ok_body(queued_milliseconds):
+    return '{"%s":%d,"%s":%d}' % (JSON_OK, JSON_OK_FLAG, JSON_QUEUED_MILLISECONDS, queued_milliseconds)
+
+
+def act_error_body(error, queued_milliseconds):
+    return '{"%s":"%s","%s":%d}' % (JSON_ERROR, error, JSON_QUEUED_MILLISECONDS, queued_milliseconds)
+
+
+def read_request(client, timeout=0.5):
+    client.settimeout(timeout)
+    request = client.recv(HTTP_RECV_INITIAL)
+    if not request:
         return None
-    while b"\r\n\r\n" not in req and len(req) < 8192:
-        more = cl.recv(512)
-        if not more: break
-        req += more
-    head, _, body = req.partition(b"\r\n\r\n")
+    while b"\r\n\r\n" not in request and len(request) < HTTP_RECV_MAX:
+        more = client.recv(HTTP_RECV_CHUNK)
+        if not more:
+            break
+        request += more
+    head, _, body = request.partition(b"\r\n\r\n")
     first = head.split(b"\r\n")[0].split(b" ")
-    method = first[0].decode() if first else "GET"
-    full = first[1].decode() if len(first) > 1 else "/"
+    method = first[0].decode() if first else METHOD_GET
+    full = first[1].decode() if len(first) > 1 else PATH_ROOT
     path, _, query = full.partition("?")
-    clen = 0
-    for h in head.split(b"\r\n"):
-        if h.lower().startswith(b"content-length"):
-            clen = int(h.split(b":")[1])
-    while len(body) < clen:
-        more = cl.recv(512)
-        if not more: break
+    content_length = 0
+    for header_line in head.split(b"\r\n"):
+        if header_line.lower().startswith(b"content-length"):
+            content_length = int(header_line.split(b":")[1])
+    while len(body) < content_length:
+        more = client.recv(HTTP_RECV_CHUNK)
+        if not more:
+            break
         body += more
     return method, path, query, body, head
 
-def handle(cl):
-    """Serve one request. Nothing here blocks on motion: chunks go to the
-    engine's queue and play from the main loop, so every request - above
-    all /stop - is answered immediately."""
-    parsed = read_request(cl)
+
+def handle(client):
+    """Serve one request. Nothing here blocks on motion."""
+    parsed = read_request(client)
     if not parsed:
         return None
     method, path, query, body, head = parsed
 
-    if method == "OPTIONS":
-        send_all(cl, "HTTP/1.1 204 No Content\r\n" + CORS +
-                     "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
-                     "Access-Control-Allow-Headers: content-type\r\n"
-                     "Access-Control-Max-Age: 86400\r\nConnection: close\r\n\r\n")
+    if method == METHOD_OPTIONS:
+        send_all(client, "HTTP/1.1 %s\r\n" % HTTP_STATUS_NO_CONTENT + CORS_HEADER +
+                 "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                 "Access-Control-Allow-Headers: content-type\r\n"
+                 "Access-Control-Max-Age: 86400\r\nConnection: close\r\n\r\n")
         return None
 
-    if path == "/set":
+    if path == PATH_SET:
         apply_set(query)
-        reply(cl, "200 OK", "ok")
-        return "set"
+        reply(client, HTTP_STATUS_OK, HTTP_BODY_OK)
+        return HANDLE_RESULT_SET
 
-    if path == "/pose":
+    if path == PATH_POSE:
         apply_pose(query)
-        reply(cl, "200 OK", "ok")
-        return "set"
+        reply(client, HTTP_STATUS_OK, HTTP_BODY_OK)
+        return HANDLE_RESULT_SET
 
-    if path == "/stop":
-        was_pose = state["pose_mode"] or eng_legs.active or eng_arms.active
-        eng_legs.clear()
-        eng_arms.clear()
+    if path == PATH_STOP:
+        was_pose = state["pose_mode"] or motion.any_engine_active()
+        motion.clear_both()
         if was_pose:
-            _release_chs(tuple(CHANNEL_PORT.keys()))
+            motion.release_all_mapped_ports()
         else:
-            stop_all()
+            motion.settle_then_release_all()
         state["moving_set"] = False
         state["pose_mode"] = False
-        reply(cl, "200 OK", "stopped")
-        return "stop"
+        reply(client, HTTP_STATUS_OK, HTTP_BODY_STOPPED)
+        return HANDLE_RESULT_STOP
 
-    if path == "/stats":
-        reply(cl, "200 OK", stats_json("reset" in query), "application/json")
+    if path == PATH_STATS:
+        reply(client, HTTP_STATUS_OK, stats_json(QUERY_STATS_RESET in query), CONTENT_TYPE_JSON)
         return None
 
-    if path == "/act" and method == "POST":
+    if path == PATH_ACT and method == METHOD_POST:
         try:
             plan = json.loads(body)
-            steps = plan.get("steps", [])
-            mode = plan.get("mode", "replace")
+            steps = plan.get(JSON_STEPS, [])
+            mode = plan.get(JSON_MODE, ENQUEUE_MODE_REPLACE)
         except Exception:
-            steps, mode = None, "replace"
+            steps, mode = None, ENQUEUE_MODE_REPLACE
         if not isinstance(steps, list) or not steps:
-            reply(cl, "400 BR", '{"err":"bad act json"}', "application/json")
+            reply(client, HTTP_STATUS_BAD_REQUEST,
+                  '{"%s":"%s"}' % (JSON_ERROR, ERROR_BAD_ACT_JSON), CONTENT_TYPE_JSON)
             return None
-        ok, res, used_legs = _enqueue_act(steps, mode)
-        if used_legs:                           # legs /act replaces walk; arms-only does not
-            state["moving_set"] = False         # chunked legs have no walk dead-man
+        succeeded, result, used_legs = motion.enqueue_wire_steps(steps, mode)
+        if used_legs:
+            state["moving_set"] = False
             state["pose_mode"] = False
-        if ok:
-            print("act: queued %dms (%s)" % (res, mode))
-            reply(cl, "200 OK", '{"ok":1,"queued_ms":%d}' % res, "application/json")
+        if succeeded:
+            print("act: queued %dms (%s)" % (result, mode))
+            reply(client, HTTP_STATUS_OK, act_ok_body(result), CONTENT_TYPE_JSON)
         else:
-            qleft = max(eng_legs.queued_ms(), eng_arms.queued_ms())
-            reply(cl, "409 Full" if res == "queue full" else "400 BR",
-                  '{"err":"%s","queued_ms":%d}' % (res, qleft),
-                  "application/json")
+            queued_left = motion.queued_milliseconds()
+            status = HTTP_STATUS_CONFLICT if result == ERROR_QUEUE_FULL else HTTP_STATUS_BAD_REQUEST
+            reply(client, status, act_error_body(result, queued_left), CONTENT_TYPE_JSON)
         return None
 
-    if path == "/ws":
-        if not WS_OK:
-            reply(cl, "501 NI", "no sha1 in this firmware build")
+    if path == PATH_WEBSOCKET:
+        if not WEBSOCKET_AVAILABLE:
+            reply(client, HTTP_STATUS_NOT_IMPLEMENTED, ERROR_NO_SHA1)
             return None
         key = None
         for line in head.split(b"\r\n"):
             if line.lower().startswith(b"sec-websocket-key"):
                 key = line.split(b":", 1)[1].strip()
         if not key:
-            reply(cl, "400 BR", "not a websocket upgrade")
+            reply(client, HTTP_STATUS_BAD_REQUEST, ERROR_NOT_WEBSOCKET)
             return None
-        accept = binascii.b2a_base64(hashlib.sha1(key + WS_GUID).digest()).strip()
-        send_all(cl, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
-                     "Connection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n"
-                     % accept.decode())
-        ws_close("replaced by new client")
-        cl.setblocking(False)
-        ws["sock"] = cl
-        ws["buf"] = b""
-        poller.register(cl, select.POLLIN)
+        accept = binascii.b2a_base64(hashlib.sha1(key + WEBSOCKET_GUID).digest()).strip()
+        send_all(client, "HTTP/1.1 %s\r\nUpgrade: websocket\r\n"
+                 "Connection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n"
+                 % (HTTP_STATUS_SWITCHING_PROTOCOLS, accept.decode()))
+        websocket_close("replaced by new client")
+        client.setblocking(False)
+        websocket_state["socket"] = client
+        websocket_state["buffer"] = b""
+        poller.register(client, select.POLLIN)
         print("ws connected")
-        return "ws"
+        return HANDLE_RESULT_WEBSOCKET
 
-    if path == "/":
-        send_all(cl, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n")
-        send_all(cl, PAGE)
-    elif path == "/routine":
-        name = query.split("name=")[-1] if "name=" in query else ""
-        if name in ROUTINES:
+    if path == PATH_ROOT:
+        send_all(client, "HTTP/1.1 %s\r\nContent-Type: %s\r\nConnection: close\r\n\r\n"
+                 % (HTTP_STATUS_OK, CONTENT_TYPE_HTML))
+        send_all(client, PAGE)
+    elif path == PATH_ROUTINE:
+        name = query.split(QUERY_ROUTINE_NAME)[-1] if QUERY_ROUTINE_NAME in query else ""
+        succeeded, result, _used_legs = motion.enqueue_routine(name)
+        if succeeded:
             state["moving_set"] = False
             state["pose_mode"] = False
-            ok, res, _legs = _enqueue_act(ROUTINES[name], "replace")
-            print("routine %s: queued %s" % (name, res))
-            reply(cl, "200 OK", "routine %s queued (%sms)" % (name, res))
+            print("routine %s: queued %s" % (name, result))
+            reply(client, HTTP_STATUS_OK, "routine %s queued (%sms)" % (name, result))
         else:
-            reply(cl, "404 NF", "unknown routine")
-    elif path == "/seq" and method == "POST":
+            reply(client, HTTP_STATUS_NOT_FOUND, ERROR_UNKNOWN_ROUTINE)
+    elif path == PATH_SEQ and method == METHOD_POST:
         try:
-            steps = json.loads(body).get("steps", [])
+            steps = json.loads(body).get(JSON_STEPS, [])
         except Exception:
             steps = None
-        frames = speed_to_keyframes(steps) if steps else []
+        frames = speed_steps_to_wire_keyframes(steps) if steps else []
         if frames:
             state["moving_set"] = False
             state["pose_mode"] = False
-            ok, res, _legs = _enqueue_act(frames, "replace")
-            print("seq: %d steps -> %s" % (len(frames), res))
-            if ok:
-                reply(cl, "200 OK", "queued %dms (%d steps)" % (res, len(frames)))
+            succeeded, result, _used_legs = motion.enqueue_wire_steps(frames, ENQUEUE_MODE_REPLACE)
+            print("seq: %d steps -> %s" % (len(frames), result))
+            if succeeded:
+                reply(client, HTTP_STATUS_OK, "queued %dms (%d steps)" % (result, len(frames)))
             else:
-                reply(cl, "409 Full", res)
+                reply(client, HTTP_STATUS_CONFLICT, result)
         else:
-            reply(cl, "400 BR", "bad steps json")
-    elif path == "/servo":
-        p = deg = None
-        off = False
-        for kv in query.split("&"):
-            k, _, v = kv.partition("=")
+            reply(client, HTTP_STATUS_BAD_REQUEST, ERROR_BAD_STEPS_JSON)
+    elif path == PATH_SERVO:
+        port = degrees = None
+        turn_off = False
+        for pair in query.split("&"):
+            key, _, raw = pair.partition("=")
             try:
-                if k == "p": p = int(v)
-                elif k == "deg": deg = int(v)
-                elif k == "off": off = v not in ("0", "")
+                if key == QUERY_SERVO_PORT:
+                    port = int(raw)
+                elif key == QUERY_SERVO_DEGREES:
+                    degrees = int(raw)
+                elif key == QUERY_SERVO_OFF:
+                    turn_off = raw not in QUERY_OFF_FALSE_VALUES
             except ValueError:
                 pass
-        if p is None or not 1 <= p <= 8 or p in DEAD_PORTS:
-            reply(cl, "400 BR", "bad port (1-8, port 2 is dead)")
-        elif off:
-            _release(p)
-            reply(cl, "200 OK", "servo %d released" % p)
-        elif deg is not None:
-            deg = max(0, min(180, deg))
-            board.servoWrite(p, deg)
-            reply(cl, "200 OK", "servo %d -> %d" % (p, deg))
+        if port is None or not SERVO_PORT_MIN <= port <= SERVO_PORT_MAX or port == UNUSED_KITRONIK_PORT:
+            reply(client, HTTP_STATUS_BAD_REQUEST, ERROR_BAD_PORT)
+        elif turn_off:
+            board.release(port)
+            reply(client, HTTP_STATUS_OK, "servo %d released" % port)
+        elif degrees is not None:
+            degrees = clamp_degrees_int(degrees)
+            board.servoWrite(port, degrees)
+            reply(client, HTTP_STATUS_OK, "servo %d -> %d" % (port, degrees))
         else:
-            reply(cl, "400 BR", "need deg= or off=1")
+            reply(client, HTTP_STATUS_BAD_REQUEST, ERROR_NEED_DEG_OR_OFF)
     else:
-        reply(cl, "404 NF", "nope")
+        reply(client, HTTP_STATUS_NOT_FOUND, HTTP_BODY_NOPE)
     return None
 
-srv = socket.socket()
-srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-srv.bind(socket.getaddrinfo("0.0.0.0", 80)[0][-1])
-srv.listen(4)
-srv.settimeout(0)
+server_socket = socket.socket()
+server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server_socket.bind(socket.getaddrinfo(BIND_ALL_INTERFACES, HTTP_PORT)[0][-1])
+server_socket.listen(HTTP_LISTEN_BACKLOG)
+server_socket.settimeout(0)
 poller = select.poll()
-poller.register(srv, select.POLLIN)
+poller.register(server_socket, select.POLLIN)
 UP0 = time.ticks_ms()
 print("ready - v3: /act /set /pose /ws /stop /seq /routine /servo /stats")
 
 while True:
-    eng_legs.tick()
-    eng_arms.tick()
+    motion.tick()
     if state["moving_set"] and \
-       time.ticks_diff(time.ticks_ms(), state["last_set"]) > DEADMAN_MS:
+       time.ticks_diff(time.ticks_ms(), state["last_set"]) > DEAD_MAN_MILLISECONDS:
         if state["pose_mode"]:
-            quick_release()
+            motion.quick_release_legs()
         else:
-            quick_stop()
+            motion.quick_stop_legs()
         state["moving_set"] = False
         state["pose_mode"] = False
         state["deadman"] += 1
         print("dead-man stop (#%d)" % state["deadman"])
     try:
-        events = poller.poll(20)   # ms; also the dead-man check cadence
+        events = poller.poll(POLL_MILLISECONDS)
     except OSError:
         continue
-    for obj, ev in events:
-        if obj is srv:
+    for obj, event_flags in events:
+        if obj is server_socket:
             try:
-                cl, _ = srv.accept()
+                client, _address = server_socket.accept()
             except OSError:
                 continue
-            a = None
+            handle_result = None
             try:
-                a = handle(cl)
-            except Exception as e:
-                print("request error:", e)
+                handle_result = handle(client)
+            except Exception as error:
+                print("request error:", error)
                 try:
-                    if not state["moving_set"] and not eng_legs.active and not eng_arms.active: stop_all()
-                except Exception: pass
+                    if not state["moving_set"] and not motion.any_engine_active():
+                        motion.settle_then_release_all()
+                except Exception:
+                    pass
             finally:
-                if a != "ws":      # the ws socket must stay open
-                    try: cl.close()
-                    except Exception: pass
-        elif ws["sock"] is not None and obj is ws["sock"]:
-            if ev & (select.POLLERR | select.POLLHUP):
-                ws_close("socket error")
+                if handle_result != HANDLE_RESULT_WEBSOCKET:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+        elif websocket_state["socket"] is not None and obj is websocket_state["socket"]:
+            if event_flags & (select.POLLERR | select.POLLHUP):
+                websocket_close("socket error")
             else:
                 try:
-                    ws_service()
-                except Exception as e:
-                    print("ws error:", e)
-                    ws_close("exception")
-        else:                      # event for an already-closed socket
-            try: poller.unregister(obj)
-            except Exception: pass
+                    websocket_service()
+                except Exception as error:
+                    print("ws error:", error)
+                    websocket_close("exception")
+        else:
+            try:
+                poller.unregister(obj)
+            except Exception:
+                pass
