@@ -1,33 +1,18 @@
-"""Robot body server v3 (chunked keyframes) — Pico 2 W + Kitronik 5329.
+"""Robot body HTTP adapter — Pico 2 W + Kitronik 5329.
 
-New in v3 (2026-06-11): ACTION CHUNKING. The brain ships a short plan of
-pose keyframes; the chip plays it locally at ~50Hz with smooth easing
-(act_engine.py). Chunks can be appended while one plays = gestures chain
-with no dead air, and Wi-Fi carries intent, never per-tick servo commands
-(the CONTEXT.md cortex/cerebellum split).
+Protocol growbot-channels-1. One sparse pose (channel id → degrees). See
+docs/spec-rails.md and protocol/PROTOCOL.md.
 
-  /act            POST {"steps":[{"l":0-180,"r":0-180,"ms":N},...],
-                        "mode":"replace"|"append"}   (default replace)
-                  Keyframes in absolute degrees, 90 = neutral. ms = glide
-                  time to that pose (0 = snap); omit l or r to leave that
-                  leg; repeat a pose to hold it. Returns AT ONCE with JSON
-                  {"ok":1,"queued_ms":N}. "append" while moving = pipelining;
-                  if the queue is full it returns 409 — back off and resend.
-                  Queue drains -> hold 300ms -> servos release (limp).
-  /seq, /routine  now translate the old ±1 speed steps into keyframes
-                  (angle = 90 - speed*35) and return IMMEDIATELY with
-                  "queued Nms" — they no longer block the server, so /stop
-                  lands instantly even mid-dance.
-  /stop           instant: clears the chunk queue + goes limp.
-
-Kept from v2: /set?l=&r= (instant speeds, 500ms dead-man), /pose?l=&r=
-(absolute angles), /ws (persistent "l,r" pose stream, latest-wins),
-/servo?p=&deg=, /stats (+ act queue state), CORS, / control page (LLM box
-now speaks keyframes). Manual control (/set /pose /ws) always wins: it
-clears any queued chunks the moment it arrives.
+  POST /plans              {"steps":[{leg_l,leg_r,arm_l,arm_r,milliseconds}], "mode"}
+  PATCH /pose              sparse degrees JSON (instant; legs use 500 ms dead-man)
+  POST /stop               clear both engines + limp mapped ports
+  POST /routines/:name     canned plan (wiggle, dance, shimmy, march, bow, stretch)
+  PATCH /channels/:id      {"degrees"} or {"released": true}
+  GET /stats               telemetry + "protocol": "growbot-channels-1"
+  WS /walk                 JSON pose frames, latest-wins, legs only, 500 ms dead-man
+  GET /                    HTML control page
 
 Hardware: left leg = port 1, right leg = port 3. PORT 2 SOCKET IS DEAD.
-Legs verified POSITIONAL (SG90) 2026-06-11 via 10s hold test.
 Requires PicoRobotics.py, channels.py, act_engine.py, and motion.py on the board.
 secrets.py is OPTIONAL.
 
@@ -40,8 +25,8 @@ Wi-Fi — three sources, tried in order (shipped chips carry NO secrets):
      your network. A wrong password just lands it back in setup mode.
 
 The Anthropic key (the page's ask-Claude box) is also OPTIONAL: without it the
-box is hidden and everything else works — the creature drives /act /seq /set
-with no key on the chip. (./finish-key-rotation.sh still refreshes secrets.py.)
+box is hidden and everything else works. (./finish-key-rotation.sh still
+refreshes secrets.py.)
 
 FLASHING (plug the Pico into the Mac by USB first):
   1. open Terminal, then:  cd ~/Desktop/phone-body
@@ -59,23 +44,25 @@ try:
     from channels import (
         DEAD_MAN_MILLISECONDS,
         ENQUEUE_MODE_REPLACE,
+        ERROR_BAD_PLAN_JSON,
         ERROR_QUEUE_FULL,
-        HTTP_BODY_STOPPED,
+        ERROR_UNKNOWN_CHANNEL,
+        ERROR_UNKNOWN_ROUTINE,
         JSON_ACTIVE,
         JSON_CHANNELS,
+        JSON_DEGREES,
         JSON_ERROR,
         JSON_MODE,
         JSON_OK,
+        JSON_PROTOCOL,
         JSON_QUEUED_MILLISECONDS,
+        JSON_RELEASED,
         JSON_STEPS,
-        UNUSED_KITRONIK_PORT,
-        WIRE_LEFT_ARM,
-        WIRE_LEFT_LEG,
-        WIRE_RIGHT_ARM,
-        WIRE_RIGHT_LEG,
-        clamp_degrees_int,
+        LEG_CHANNEL_IDS,
+        PROTOCOL_GROWBOT_CHANNELS_1,
+        permit_pose,
     )
-    from motion import BodyMotion, speed_steps_to_wire_keyframes
+    from motion import BodyMotion
 except ImportError:
     print("MISSING channels.py / act_engine.py / motion.py — motors disabled")
     while True:
@@ -124,15 +111,13 @@ def unquote_form(encoded):
     return out
 
 PATH_ROOT = "/"
-PATH_SET = "/set"
 PATH_POSE = "/pose"
 PATH_STOP = "/stop"
 PATH_STATS = "/stats"
-PATH_ACT = "/act"
-PATH_WEBSOCKET = "/ws"
-PATH_ROUTINE = "/routine"
-PATH_SEQ = "/seq"
-PATH_SERVO = "/servo"
+PATH_PLANS = "/plans"
+PATH_WALK = "/walk"
+PATH_ROUTINES_PREFIX = "/routines/"
+PATH_CHANNELS_PREFIX = "/channels/"
 
 HTTP_STATUS_OK = "200 OK"
 HTTP_STATUS_NO_CONTENT = "204 No Content"
@@ -148,20 +133,15 @@ CONTENT_TYPE_HTML = "text/html"
 
 METHOD_GET = "GET"
 METHOD_POST = "POST"
+METHOD_PATCH = "PATCH"
 METHOD_OPTIONS = "OPTIONS"
 
-HANDLE_RESULT_SET = "set"
+HANDLE_RESULT_STREAM = "stream"
 HANDLE_RESULT_STOP = "stop"
 HANDLE_RESULT_WEBSOCKET = "ws"
 
-QUERY_ROUTINE_NAME = "name="
 QUERY_STATS_RESET = "reset"
-QUERY_SERVO_PORT = "p"
-QUERY_SERVO_DEGREES = "deg"
-QUERY_SERVO_OFF = "off"
 
-SERVO_PORT_MIN = 1
-SERVO_PORT_MAX = 8
 ARRIVAL_DELTA_RING_SIZE = 120
 LOG_EVERY_N_MANUAL_COMMANDS = 50
 SERVO_PWM_PERIOD_MILLISECONDS = 20
@@ -176,87 +156,46 @@ motion = BodyMotion(
 )
 
 state = {
-    "moving_set": False,
-    "last_set": 0,
-    "last_arr": None,
-    "set_n": 0,
-    "deadman": 0,
-    "pose_mode": False,
+    "legs_stream_active": False,
+    "last_stream_at": 0,
+    "last_arrival_at": None,
+    "stream_count": 0,
+    "deadman_count": 0,
 }
 arrival_deltas_milliseconds = []
 
 
-def parse_channel_query(query):
-    values = {
-        WIRE_LEFT_LEG: None,
-        WIRE_RIGHT_LEG: None,
-        WIRE_LEFT_ARM: None,
-        WIRE_RIGHT_ARM: None,
-    }
-    for pair in query.split("&"):
-        key, _, raw = pair.partition("=")
-        if key not in values:
-            continue
-        try:
-            values[key] = float(raw)
-        except ValueError:
-            pass
-    return (
-        values[WIRE_LEFT_LEG],
-        values[WIRE_RIGHT_LEG],
-        values[WIRE_LEFT_ARM],
-        values[WIRE_RIGHT_ARM],
-    )
-
-
 def mark_arrival():
     now = time.ticks_ms()
-    if state["last_arr"] is not None:
-        delta = time.ticks_diff(now, state["last_arr"])
+    if state["last_arrival_at"] is not None:
+        delta = time.ticks_diff(now, state["last_arrival_at"])
         arrival_deltas_milliseconds.append(delta)
         if len(arrival_deltas_milliseconds) > ARRIVAL_DELTA_RING_SIZE:
             arrival_deltas_milliseconds.pop(0)
-    state["last_arr"] = now
-    state["last_set"] = now
-    state["set_n"] += 1
+    state["last_arrival_at"] = now
+    state["last_stream_at"] = now
+    state["stream_count"] += 1
 
 
-def apply_set(query):
-    left_speed, right_speed, _left_arm, _right_arm = parse_channel_query(query)
-    left_speed = left_speed or 0.0
-    right_speed = right_speed or 0.0
+def apply_sparse_pose_from_client(pose, legs_only=False):
+    """Apply a sparse pose. Walk strips arms. Returns whether legs moved."""
+    permitted = permit_pose(pose) or {}
+    if legs_only:
+        walk_pose = {}
+        for channel_id in LEG_CHANNEL_IDS:
+            if channel_id in permitted:
+                walk_pose[channel_id] = permitted[channel_id]
+        permitted = walk_pose
+    if not permitted:
+        return False
     mark_arrival()
-    motion.clear_legs()
-    state["pose_mode"] = False
-    if state["set_n"] % LOG_EVERY_N_MANUAL_COMMANDS == 0:
-        last_delta = arrival_deltas_milliseconds[-1] if arrival_deltas_milliseconds else "?"
-        print("set#%d l=%.2f r=%.2f dt=%sms" % (state["set_n"], left_speed, right_speed, last_delta))
-    if left_speed == 0 and right_speed == 0:
-        motion.quick_stop_legs()
-        state["moving_set"] = False
-    else:
-        motion.write_leg_speeds(left_speed, right_speed)
-        led.on()
-        state["moving_set"] = True
-
-
-def apply_pose_vals(left_leg, right_leg, left_arm=None, right_arm=None):
-    mark_arrival()
-    touched_legs, _touched_arms = motion.apply_absolute_pose(
-        left_leg, right_leg, left_arm, right_arm,
-    )
+    touched_legs, _touched_arms = motion.apply_sparse_pose(permitted)
     if touched_legs:
-        state["pose_mode"] = True
-        state["moving_set"] = True
-    if state["set_n"] % LOG_EVERY_N_MANUAL_COMMANDS == 0:
+        state["legs_stream_active"] = True
+    if state["stream_count"] % LOG_EVERY_N_MANUAL_COMMANDS == 0:
         last_delta = arrival_deltas_milliseconds[-1] if arrival_deltas_milliseconds else "?"
-        print("pose#%d l=%s r=%s al=%s ar=%s dt=%sms" % (
-            state["set_n"], left_leg, right_leg, left_arm, right_arm, last_delta))
-
-
-def apply_pose(query):
-    left_leg, right_leg, left_arm, right_arm = parse_channel_query(query)
-    apply_pose_vals(left_leg, right_leg, left_arm, right_arm)
+        print("pose#%d %s dt=%sms" % (state["stream_count"], permitted, last_delta))
+    return touched_legs
 
 
 def stats_json(reset):
@@ -269,15 +208,16 @@ def stats_json(reset):
         return deltas[index]
 
     out = json.dumps({
-        "set_n": state["set_n"],
-        "deadman": state["deadman"],
-        "ws_rx": websocket_state["frames_received"],
-        "moving": state["moving_set"],
+        JSON_PROTOCOL: PROTOCOL_GROWBOT_CHANNELS_1,
+        "set_n": state["stream_count"],
+        "deadman": state["deadman_count"],
+        "walk_rx": websocket_state["frames_received"],
+        "moving": state["legs_stream_active"],
         "act": {
             JSON_ACTIVE: motion.any_engine_active(),
             JSON_QUEUED_MILLISECONDS: motion.queued_milliseconds(),
         },
-        JSON_CHANNELS: motion.loaded_wire_keys(),
+        JSON_CHANNELS: motion.loaded_channel_ids(),
         "up_s": time.ticks_diff(time.ticks_ms(), UP0) // 1000,
         "dt_ms": {
             "n": len(deltas),
@@ -290,13 +230,13 @@ def stats_json(reset):
     })
     if reset:
         del arrival_deltas_milliseconds[:]
-        state["set_n"] = 0
-        state["last_arr"] = None
-        state["deadman"] = 0
+        state["stream_count"] = 0
+        state["last_arrival_at"] = None
+        state["deadman_count"] = 0
     return out
 
 
-motion.settle_then_release_all()
+motion.release_all_mapped_ports()
 
 # ---------- Wi-Fi (ladder: wifi.json -> secrets.py -> setup hotspot) ----------
 wlan = network.WLAN(network.STA_IF)
@@ -404,7 +344,7 @@ if SSID:
 if not joined:
     setup_mode()                      # never returns (reboots after save)
 IP = wlan.ifconfig()[0]
-print("\n  ROBOT SERVER v3 (keyframes):  http://%s/\n" % IP)
+print("\n  ROBOT SERVER growbot-channels-1:  http://%s/\n" % IP)
 
 # ---------- the page ----------
 PAGE = """<!DOCTYPE html><html><head><meta charset=utf-8>
@@ -424,15 +364,15 @@ border:1px solid rgba(120,160,200,.25);border-radius:14px;padding:12px;font-size
 #st{color:#7f93ab;font-size:14px;min-height:1.2em;text-align:center}
 #say{color:#37e0c8;font-size:15px;min-height:1.2em;text-align:center;max-width:420px}
 </style></head><body>
-<h1>robot legs &middot; buttons + LLM &middot; v3 keyframes</h1>
+<h1>robot legs &middot; growbot-channels-1</h1>
 <div class=grid>
-<button id=stop onclick="go('stop')">STOP</button>
-<button onclick="go('routine?name=wiggle')">wiggle</button>
-<button onclick="go('routine?name=dance')">dance</button>
-<button onclick="go('routine?name=shimmy')">shimmy</button>
-<button onclick="go('routine?name=march')">march</button>
-<button onclick="go('routine?name=bow')">bow</button>
-<button onclick="go('routine?name=stretch')">stretch</button>
+<button id=stop onclick="post('/stop')">STOP</button>
+<button onclick="post('/routines/wiggle')">wiggle</button>
+<button onclick="post('/routines/dance')">dance</button>
+<button onclick="post('/routines/shimmy')">shimmy</button>
+<button onclick="post('/routines/march')">march</button>
+<button onclick="post('/routines/bow')">bow</button>
+<button onclick="post('/routines/stretch')">stretch</button>
 </div>
 <textarea id=q placeholder="type here - or tap this box and use the keyboard mic to dictate, then hit ask"></textarea>
 <button id=mic onclick="mic()">&#127908; tap to talk</button>
@@ -444,17 +384,18 @@ var st=document.getElementById('st'),say=document.getElementById('say'),q=docume
 var KEY='%KEY%';
 if(!KEY){ q.style.display='none'; document.getElementById('mic').style.display='none';
  document.getElementById('ask').style.display='none'; }
-function go(p){st.textContent='moving...';
- fetch('/'+p).then(function(r){return r.text();}).then(function(t){st.textContent=t;})
- .catch(function(){st.textContent='! no link to robot';});}
+function post(p){st.textContent='moving...';
+ fetch(p,{method:'POST'}).then(function(r){return r.json();}).then(function(d){
+  st.textContent=d.ok?(d.queued_milliseconds!=null?('queued '+d.queued_milliseconds+'ms'):'ok'):(d.error||'ok');
+ }).catch(function(){st.textContent='! no link to robot';});}
 var SYS='You choreograph a small 2-leg desk robot. Each leg is a positional servo with the FULL '+
 '0-180 range (90 = straight-down neutral stance; 0 and 180 are the extreme fore/aft swings). '+
 'You write animation KEYFRAMES: the body glides smoothly from pose to pose, each keyframe taking '+
-'ms to arrive. Repeat a pose to hold it (a rest). Reply with ONLY raw JSON, no fences: '+
-'{"say":"<one short fun sentence>","steps":[{"l":<0-180>,"r":<0-180>,"ms":<120..2000>}]} '+
-'l=left leg, r=right leg. Use the whole range for big expressive moves; just know wide stances '+
+'milliseconds to arrive. Repeat a pose to hold it (a rest). Reply with ONLY raw JSON, no fences: '+
+'{"say":"<one short fun sentence>","steps":[{"leg_l":<0-180>,"leg_r":<0-180>,"milliseconds":<120..2000>}]} '+
+'Use the whole range for big expressive moves; just know wide stances '+
 'or fast extremes can tip a small desk robot, so land back near 90 to settle. Max 24 keyframes, '+
-'total under 12000ms. Be expressive: deep bows, high marches, asymmetric struts, dramatic pauses.';
+'total under 12000 milliseconds. Be expressive: deep bows, high marches, asymmetric struts, dramatic pauses.';
 function ask(){
  var text=q.value.trim(); if(!text){st.textContent='type something first';return;}
  st.textContent='asking Claude...'; say.textContent='';
@@ -471,10 +412,10 @@ function ask(){
   var plan=JSON.parse(txt);
   say.textContent='Claude: '+(plan.say||'');
   st.textContent='Claude sent '+plan.steps.length+' keyframes - playing...';
-  return fetch('/act',{method:'POST',headers:{'content-type':'application/json'},
+  return fetch('/plans',{method:'POST',headers:{'content-type':'application/json'},
    body:JSON.stringify({steps:plan.steps,mode:'replace'})})
    .then(function(r){return r.json();})
-   .then(function(d2){st.textContent=d2.ok?('playing '+d2.queued_ms+'ms of motion'):('! '+d2.err);});})
+   .then(function(d2){st.textContent=d2.ok?('playing '+d2.queued_milliseconds+'ms of motion'):('! '+d2.error);});})
  .catch(function(e){st.textContent='! '+e.message;});}
 var SR=window.SpeechRecognition||window.webkitSpeechRecognition,rec=null,micb=document.getElementById('mic');
 function mic(){
@@ -490,7 +431,7 @@ function mic(){
  rec.start();}
 </script></body></html>""".replace("%KEY%", SERVED_KEY)
 
-# ---------- WebSocket (persistent /pose stream) ----------
+# ---------- WebSocket (persistent /walk pose stream) ----------
 try:
     import hashlib, binascii
     WEBSOCKET_AVAILABLE = hasattr(hashlib, "sha1")
@@ -563,10 +504,9 @@ def websocket_close(reason=""):
         pass
     websocket_state["socket"] = None
     websocket_state["buffer"] = b""
-    if state["moving_set"]:
+    if state["legs_stream_active"]:
         motion.quick_release_legs()
-        state["moving_set"] = False
-        state["pose_mode"] = False
+        state["legs_stream_active"] = False
     print("ws closed:", reason)
 
 def websocket_service():
@@ -609,24 +549,16 @@ def websocket_service():
             websocket_state["frames_received"] += 1
     if latest is not None:
         try:
-            parts = latest.decode().split(",")
-            if len(parts) >= 2:
-                apply_pose_vals(float(parts[0]), float(parts[1]))
-        except ValueError:
+            pose = json.loads(latest.decode())
+            if isinstance(pose, dict):
+                apply_sparse_pose_from_client(pose, legs_only=True)
+        except (ValueError, TypeError):
             pass
 
 CORS_HEADER = "Access-Control-Allow-Origin: *\r\n"
-ERROR_BAD_ACT_JSON = "bad act json"
-ERROR_BAD_STEPS_JSON = "bad steps json"
-ERROR_UNKNOWN_ROUTINE = "unknown routine"
-ERROR_BAD_PORT = "bad port (1-8, port 2 is dead)"
-ERROR_NEED_DEG_OR_OFF = "need deg= or off=1"
 ERROR_NOT_WEBSOCKET = "not a websocket upgrade"
 ERROR_NO_SHA1 = "no sha1 in this firmware build"
-HTTP_BODY_OK = JSON_OK
-HTTP_BODY_NOPE = "nope"
-QUERY_OFF_FALSE_VALUES = ("0", "")
-JSON_OK_FLAG = 1
+ERROR_NOT_FOUND = "not_found"
 POLL_MILLISECONDS = SERVO_PWM_PERIOD_MILLISECONDS
 HTTP_LISTEN_BACKLOG = 4
 HTTP_PORT = 80
@@ -641,18 +573,34 @@ def send_all(client, data):
         data = data[sent:]
 
 
-def reply(client, status, body_text, content_type=CONTENT_TYPE_TEXT):
+def reply(client, status, body_text, content_type=CONTENT_TYPE_JSON):
     send_all(client, "HTTP/1.1 %s\r\n%sContent-Type: %s\r\nConnection: close\r\n\r\n"
              % (status, CORS_HEADER, content_type))
     send_all(client, body_text)
 
 
-def act_ok_body(queued_milliseconds):
-    return '{"%s":%d,"%s":%d}' % (JSON_OK, JSON_OK_FLAG, JSON_QUEUED_MILLISECONDS, queued_milliseconds)
+def ok_body(queued_milliseconds=None):
+    payload = {JSON_OK: True}
+    if queued_milliseconds is not None:
+        payload[JSON_QUEUED_MILLISECONDS] = queued_milliseconds
+    return json.dumps(payload)
 
 
-def act_error_body(error, queued_milliseconds):
-    return '{"%s":"%s","%s":%d}' % (JSON_ERROR, error, JSON_QUEUED_MILLISECONDS, queued_milliseconds)
+def error_body(error, queued_milliseconds=None):
+    payload = {JSON_ERROR: error}
+    if queued_milliseconds is not None:
+        payload[JSON_QUEUED_MILLISECONDS] = queued_milliseconds
+    return json.dumps(payload)
+
+
+def parse_json_object(body):
+    try:
+        parsed = json.loads(body)
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
 
 
 def read_request(client, timeout=0.5):
@@ -682,6 +630,18 @@ def read_request(client, timeout=0.5):
     return method, path, query, body, head
 
 
+def reply_plan_result(client, succeeded, result, used_legs, mode):
+    if used_legs:
+        state["legs_stream_active"] = False
+    if succeeded:
+        print("plan: queued %dms (%s)" % (result, mode))
+        reply(client, HTTP_STATUS_OK, ok_body(result))
+        return
+    queued_left = motion.queued_milliseconds()
+    status = HTTP_STATUS_CONFLICT if result == ERROR_QUEUE_FULL else HTTP_STATUS_BAD_REQUEST
+    reply(client, status, error_body(result, queued_left))
+
+
 def handle(client):
     """Serve one request. Nothing here blocks on motion."""
     parsed = read_request(client)
@@ -691,71 +651,54 @@ def handle(client):
 
     if method == METHOD_OPTIONS:
         send_all(client, "HTTP/1.1 %s\r\n" % HTTP_STATUS_NO_CONTENT + CORS_HEADER +
-                 "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+                 "Access-Control-Allow-Methods: GET, POST, PATCH, OPTIONS\r\n"
                  "Access-Control-Allow-Headers: content-type\r\n"
                  "Access-Control-Max-Age: 86400\r\nConnection: close\r\n\r\n")
         return None
 
-    if path == PATH_SET:
-        apply_set(query)
-        reply(client, HTTP_STATUS_OK, HTTP_BODY_OK)
-        return HANDLE_RESULT_SET
+    if path == PATH_PLANS and method == METHOD_POST:
+        plan = parse_json_object(body)
+        if plan is None:
+            reply(client, HTTP_STATUS_BAD_REQUEST, error_body(ERROR_BAD_PLAN_JSON))
+            return None
+        steps = plan.get(JSON_STEPS, [])
+        mode = plan.get(JSON_MODE, ENQUEUE_MODE_REPLACE)
+        if not isinstance(steps, list):
+            reply(client, HTTP_STATUS_BAD_REQUEST, error_body(ERROR_BAD_PLAN_JSON))
+            return None
+        succeeded, result, used_legs = motion.enqueue_steps(steps, mode)
+        reply_plan_result(client, succeeded, result, used_legs, mode)
+        return None
 
-    if path == PATH_POSE:
-        apply_pose(query)
-        reply(client, HTTP_STATUS_OK, HTTP_BODY_OK)
-        return HANDLE_RESULT_SET
+    if path == PATH_POSE and method == METHOD_PATCH:
+        pose = parse_json_object(body)
+        if pose is None:
+            reply(client, HTTP_STATUS_BAD_REQUEST, error_body(ERROR_BAD_PLAN_JSON))
+            return None
+        apply_sparse_pose_from_client(pose, legs_only=False)
+        reply(client, HTTP_STATUS_OK, ok_body())
+        return HANDLE_RESULT_STREAM
 
-    if path == PATH_STOP:
-        was_pose = state["pose_mode"] or motion.any_engine_active()
-        motion.clear_both()
-        if was_pose:
-            motion.release_all_mapped_ports()
-        else:
-            motion.settle_then_release_all()
-        state["moving_set"] = False
-        state["pose_mode"] = False
-        reply(client, HTTP_STATUS_OK, HTTP_BODY_STOPPED)
+    if path == PATH_STOP and method == METHOD_POST:
+        motion.stop()
+        state["legs_stream_active"] = False
+        reply(client, HTTP_STATUS_OK, ok_body())
         return HANDLE_RESULT_STOP
 
-    if path == PATH_STATS:
-        reply(client, HTTP_STATUS_OK, stats_json(QUERY_STATS_RESET in query), CONTENT_TYPE_JSON)
+    if path == PATH_STATS and method == METHOD_GET:
+        reply(client, HTTP_STATUS_OK, stats_json(QUERY_STATS_RESET in query))
         return None
 
-    if path == PATH_ACT and method == METHOD_POST:
-        try:
-            plan = json.loads(body)
-            steps = plan.get(JSON_STEPS, [])
-            mode = plan.get(JSON_MODE, ENQUEUE_MODE_REPLACE)
-        except Exception:
-            steps, mode = None, ENQUEUE_MODE_REPLACE
-        if not isinstance(steps, list) or not steps:
-            reply(client, HTTP_STATUS_BAD_REQUEST,
-                  '{"%s":"%s"}' % (JSON_ERROR, ERROR_BAD_ACT_JSON), CONTENT_TYPE_JSON)
-            return None
-        succeeded, result, used_legs = motion.enqueue_wire_steps(steps, mode)
-        if used_legs:
-            state["moving_set"] = False
-            state["pose_mode"] = False
-        if succeeded:
-            print("act: queued %dms (%s)" % (result, mode))
-            reply(client, HTTP_STATUS_OK, act_ok_body(result), CONTENT_TYPE_JSON)
-        else:
-            queued_left = motion.queued_milliseconds()
-            status = HTTP_STATUS_CONFLICT if result == ERROR_QUEUE_FULL else HTTP_STATUS_BAD_REQUEST
-            reply(client, status, act_error_body(result, queued_left), CONTENT_TYPE_JSON)
-        return None
-
-    if path == PATH_WEBSOCKET:
+    if path == PATH_WALK:
         if not WEBSOCKET_AVAILABLE:
-            reply(client, HTTP_STATUS_NOT_IMPLEMENTED, ERROR_NO_SHA1)
+            reply(client, HTTP_STATUS_NOT_IMPLEMENTED, error_body(ERROR_NO_SHA1))
             return None
         key = None
         for line in head.split(b"\r\n"):
             if line.lower().startswith(b"sec-websocket-key"):
                 key = line.split(b":", 1)[1].strip()
         if not key:
-            reply(client, HTTP_STATUS_BAD_REQUEST, ERROR_NOT_WEBSOCKET)
+            reply(client, HTTP_STATUS_BAD_REQUEST, error_body(ERROR_NOT_WEBSOCKET))
             return None
         accept = binascii.b2a_base64(hashlib.sha1(key + WEBSOCKET_GUID).digest()).strip()
         send_all(client, "HTTP/1.1 %s\r\nUpgrade: websocket\r\n"
@@ -766,67 +709,48 @@ def handle(client):
         websocket_state["socket"] = client
         websocket_state["buffer"] = b""
         poller.register(client, select.POLLIN)
-        print("ws connected")
+        print("walk connected")
         return HANDLE_RESULT_WEBSOCKET
 
-    if path == PATH_ROOT:
+    if path == PATH_ROOT and method == METHOD_GET:
         send_all(client, "HTTP/1.1 %s\r\nContent-Type: %s\r\nConnection: close\r\n\r\n"
                  % (HTTP_STATUS_OK, CONTENT_TYPE_HTML))
         send_all(client, PAGE)
-    elif path == PATH_ROUTINE:
-        name = query.split(QUERY_ROUTINE_NAME)[-1] if QUERY_ROUTINE_NAME in query else ""
-        succeeded, result, _used_legs = motion.enqueue_routine(name)
+        return None
+
+    if path.startswith(PATH_ROUTINES_PREFIX) and method == METHOD_POST:
+        name = path[len(PATH_ROUTINES_PREFIX):]
+        if not name or "/" in name:
+            reply(client, HTTP_STATUS_NOT_FOUND, error_body(ERROR_UNKNOWN_ROUTINE))
+            return None
+        succeeded, result, used_legs = motion.enqueue_routine(name)
         if succeeded:
-            state["moving_set"] = False
-            state["pose_mode"] = False
-            print("routine %s: queued %s" % (name, result))
-            reply(client, HTTP_STATUS_OK, "routine %s queued (%sms)" % (name, result))
+            reply_plan_result(client, True, result, used_legs, name)
         else:
-            reply(client, HTTP_STATUS_NOT_FOUND, ERROR_UNKNOWN_ROUTINE)
-    elif path == PATH_SEQ and method == METHOD_POST:
-        try:
-            steps = json.loads(body).get(JSON_STEPS, [])
-        except Exception:
-            steps = None
-        frames = speed_steps_to_wire_keyframes(steps) if steps else []
-        if frames:
-            state["moving_set"] = False
-            state["pose_mode"] = False
-            succeeded, result, _used_legs = motion.enqueue_wire_steps(frames, ENQUEUE_MODE_REPLACE)
-            print("seq: %d steps -> %s" % (len(frames), result))
-            if succeeded:
-                reply(client, HTTP_STATUS_OK, "queued %dms (%d steps)" % (result, len(frames)))
-            else:
-                reply(client, HTTP_STATUS_CONFLICT, result)
-        else:
-            reply(client, HTTP_STATUS_BAD_REQUEST, ERROR_BAD_STEPS_JSON)
-    elif path == PATH_SERVO:
-        port = degrees = None
-        turn_off = False
-        for pair in query.split("&"):
-            key, _, raw = pair.partition("=")
-            try:
-                if key == QUERY_SERVO_PORT:
-                    port = int(raw)
-                elif key == QUERY_SERVO_DEGREES:
-                    degrees = int(raw)
-                elif key == QUERY_SERVO_OFF:
-                    turn_off = raw not in QUERY_OFF_FALSE_VALUES
-            except ValueError:
-                pass
-        if port is None or not SERVO_PORT_MIN <= port <= SERVO_PORT_MAX or port == UNUSED_KITRONIK_PORT:
-            reply(client, HTTP_STATUS_BAD_REQUEST, ERROR_BAD_PORT)
-        elif turn_off:
-            board.release(port)
-            reply(client, HTTP_STATUS_OK, "servo %d released" % port)
-        elif degrees is not None:
-            degrees = clamp_degrees_int(degrees)
-            board.servoWrite(port, degrees)
-            reply(client, HTTP_STATUS_OK, "servo %d -> %d" % (port, degrees))
-        else:
-            reply(client, HTTP_STATUS_BAD_REQUEST, ERROR_NEED_DEG_OR_OFF)
-    else:
-        reply(client, HTTP_STATUS_NOT_FOUND, HTTP_BODY_NOPE)
+            reply(client, HTTP_STATUS_NOT_FOUND, error_body(ERROR_UNKNOWN_ROUTINE))
+        return None
+
+    if path.startswith(PATH_CHANNELS_PREFIX) and method == METHOD_PATCH:
+        channel_id = path[len(PATH_CHANNELS_PREFIX):]
+        if not channel_id or "/" in channel_id or not motion.knows_channel(channel_id):
+            reply(client, HTTP_STATUS_NOT_FOUND, error_body(ERROR_UNKNOWN_CHANNEL))
+            return None
+        payload = parse_json_object(body)
+        if payload is None:
+            reply(client, HTTP_STATUS_BAD_REQUEST, error_body(ERROR_BAD_PLAN_JSON))
+            return None
+        if payload.get(JSON_RELEASED):
+            motion.release_channels((channel_id,), turn_led_off=False)
+            reply(client, HTTP_STATUS_OK, ok_body())
+            return None
+        if JSON_DEGREES not in payload:
+            reply(client, HTTP_STATUS_BAD_REQUEST, error_body(ERROR_BAD_PLAN_JSON))
+            return None
+        motion.write_channel_degrees(channel_id, payload[JSON_DEGREES])
+        reply(client, HTTP_STATUS_OK, ok_body())
+        return None
+
+    reply(client, HTTP_STATUS_NOT_FOUND, error_body(ERROR_NOT_FOUND))
     return None
 
 server_socket = socket.socket()
@@ -837,20 +761,16 @@ server_socket.settimeout(0)
 poller = select.poll()
 poller.register(server_socket, select.POLLIN)
 UP0 = time.ticks_ms()
-print("ready - v3: /act /set /pose /ws /stop /seq /routine /servo /stats")
+print("ready - growbot-channels-1: POST /plans PATCH /pose POST /stop WS /walk GET /stats")
 
 while True:
     motion.tick()
-    if state["moving_set"] and \
-       time.ticks_diff(time.ticks_ms(), state["last_set"]) > DEAD_MAN_MILLISECONDS:
-        if state["pose_mode"]:
-            motion.quick_release_legs()
-        else:
-            motion.quick_stop_legs()
-        state["moving_set"] = False
-        state["pose_mode"] = False
-        state["deadman"] += 1
-        print("dead-man stop (#%d)" % state["deadman"])
+    if state["legs_stream_active"] and \
+       time.ticks_diff(time.ticks_ms(), state["last_stream_at"]) > DEAD_MAN_MILLISECONDS:
+        motion.quick_release_legs()
+        state["legs_stream_active"] = False
+        state["deadman_count"] += 1
+        print("dead-man stop (#%d)" % state["deadman_count"])
     try:
         events = poller.poll(POLL_MILLISECONDS)
     except OSError:
@@ -867,8 +787,8 @@ while True:
             except Exception as error:
                 print("request error:", error)
                 try:
-                    if not state["moving_set"] and not motion.any_engine_active():
-                        motion.settle_then_release_all()
+                    if not state["legs_stream_active"] and not motion.any_engine_active():
+                        motion.release_all_mapped_ports()
                 except Exception:
                     pass
             finally:

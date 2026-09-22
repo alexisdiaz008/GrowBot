@@ -3,18 +3,16 @@
 # Speaks BOTH body lanes over the relay, reusing the motor driver + act_engine
 # (so gestures glide exactly like the LAN firmware).
 #
-# ===== CANONICAL WIRE PROTOCOL (keep identical to relay-transport.js) =====
+# ===== CANONICAL WIRE PROTOCOL (keep identical to HTTP; growbot-channels-1) =====
 #   phone -> chip:
-#     {"t":"attach","id","code"}                      handshake (sent by the app/tester)
-#     {"t":"pose","lr":"L,R"}                          WALK lane: latest-wins ~30Hz, L,R int deg 0..180
-#     {"t":"act","rid","steps":[{l,r,al,ar,ms}],"mode"}  GESTURE: optional al/ar; arms-only leaves walk running
-#     {"t":"routine","rid","name"}                     canned gesture (e.g. "wiggle")
-#     {"t":"stop","rid"}                               halt gesture + limp
+#     {"type":"pose","leg_l":70,"leg_r":110}            WALK: latest-wins ~30Hz, sparse JSON
+#     {"type":"plan","request_id","steps","mode"}         GESTURE keyframes; arms-only leaves walk
+#     {"type":"routine","request_id","name"}              canned gesture (e.g. "wiggle")
+#     {"type":"stop","request_id"}                        halt gesture + limp
 #   chip -> phone:
-#     {"t":"hello","id"}                               chip handshake to the relay
-#     {"t":"ack","rid","ok","queued_ms"}               reply to act/routine/stop
-#     {"t":"status","awake"}                           emitted by the RELAY (chip presence), not the chip
-#   (a pose carrying "seq"/"ts" gets a {"t":"ack","seq","ts"} echo — latency tools only.)
+#     {"type":"hello","id"}                               chip handshake to the relay
+#     {"type":"ack","request_id","ok","queued_milliseconds"}
+#     {"type":"status","awake"}                           emitted by the RELAY (chip presence)
 #
 # ===== LINK SELF-HEAL =====
 # Field failure: a servo-current brownout can kill the WiFi/relay link while the Pico
@@ -38,11 +36,17 @@ try:
         CHANNEL_RIGHT_LEG,
         DEAD_MAN_MILLISECONDS,
         ENQUEUE_MODE_REPLACE,
+        JSON_ID,
         JSON_MODE,
+        JSON_NAME,
         JSON_OK,
         JSON_QUEUED_MILLISECONDS,
+        JSON_REQUEST_ID,
         JSON_STEPS,
+        JSON_TYPE,
+        LEG_CHANNEL_IDS,
         SERVO_NEUTRAL_DEGREES,
+        permit_pose,
     )
     from motion import BodyMotion
 except ImportError:
@@ -80,28 +84,22 @@ REDIAL_BACKOFF_CAP_MILLISECONDS = 30000
 REDIAL_BACKOFF_BASE_MILLISECONDS = 1000
 TLS_PORT = 443
 
-RELAY_TYPE_FIELD = "t"
 RELAY_TYPE_POSE = "pose"
-RELAY_TYPE_ACT = "act"
+RELAY_TYPE_PLAN = "plan"
 RELAY_TYPE_ROUTINE = "routine"
 RELAY_TYPE_STOP = "stop"
 RELAY_TYPE_HELLO = "hello"
 RELAY_TYPE_ACK = "ack"
-RELAY_POSE_CSV = "lr"
-RELAY_REQUEST_ID = "rid"
 RELAY_SEQUENCE = "seq"
 RELAY_TIMESTAMP = "ts"
-RELAY_ROUTINE_NAME = "name"
-RELAY_DEVICE_ID_FIELD = "id"
-DEFAULT_POSE_CSV = "90,90"
 
 LANE_POSE = "pose"
 LANE_ACT_LEGS = "act_legs"
 LANE_ACT_ARMS = "act_arms"
 LANE_STOP = "stop"
 
-JSON_OK_TRUE = 1
-JSON_OK_FALSE = 0
+JSON_OK_TRUE = True
+JSON_OK_FALSE = False
 WEBSOCKET_LENGTH_16BIT = 126
 WEBSOCKET_TEXT_FRAME_UNMASKED_BASE = 0x81
 WEBSOCKET_MASK_BIT = 0x80
@@ -253,11 +251,20 @@ def read_frame_after_first_byte(ssl_socket, first_byte):
 
 def send_ack(ssl_socket, message, succeeded, queued_milliseconds):
     send_text(ssl_socket, json.dumps({
-        RELAY_TYPE_FIELD: RELAY_TYPE_ACK,
-        RELAY_REQUEST_ID: message.get(RELAY_REQUEST_ID),
+        JSON_TYPE: RELAY_TYPE_ACK,
+        JSON_REQUEST_ID: message.get(JSON_REQUEST_ID),
         JSON_OK: JSON_OK_TRUE if succeeded else JSON_OK_FALSE,
         JSON_QUEUED_MILLISECONDS: queued_milliseconds,
     }))
+
+
+def walk_pose_from_message(message):
+    permitted = permit_pose(message) or {}
+    walk_pose = {}
+    for channel_id in LEG_CHANNEL_IDS:
+        if channel_id in permitted:
+            walk_pose[channel_id] = permitted[channel_id]
+    return walk_pose
 
 
 def handle_relay_message(ssl_socket, payload):
@@ -266,33 +273,30 @@ def handle_relay_message(ssl_socket, payload):
         message = json.loads(payload)
     except Exception:
         return None
-    message_type = message.get(RELAY_TYPE_FIELD)
+    message_type = message.get(JSON_TYPE)
     if message_type == RELAY_TYPE_POSE:
-        motion.clear_legs()
-        try:
-            parts = message.get(RELAY_POSE_CSV, DEFAULT_POSE_CSV).split(",")
-            motion.apply_absolute_pose(float(parts[0]), float(parts[1]))
-        except Exception:
-            pass
+        walk_pose = walk_pose_from_message(message)
+        if not walk_pose:
+            return None
+        motion.apply_sparse_pose(walk_pose)
         if RELAY_SEQUENCE in message:
             send_text(ssl_socket, json.dumps({
-                RELAY_TYPE_FIELD: RELAY_TYPE_ACK,
+                JSON_TYPE: RELAY_TYPE_ACK,
                 RELAY_SEQUENCE: message[RELAY_SEQUENCE],
                 RELAY_TIMESTAMP: message.get(RELAY_TIMESTAMP, 0),
             }))
         return LANE_POSE
-    if message_type == RELAY_TYPE_ACT:
-        succeeded, queued, used_legs = motion.enqueue_wire_steps(
+    if message_type == RELAY_TYPE_PLAN:
+        succeeded, queued, used_legs = motion.enqueue_steps(
             message.get(JSON_STEPS, []), message.get(JSON_MODE, ENQUEUE_MODE_REPLACE))
         send_ack(ssl_socket, message, succeeded, queued if succeeded else 0)
         return LANE_ACT_LEGS if used_legs else LANE_ACT_ARMS
     if message_type == RELAY_TYPE_ROUTINE:
-        succeeded, queued, used_legs = motion.enqueue_routine(message.get(RELAY_ROUTINE_NAME, ""))
+        succeeded, queued, used_legs = motion.enqueue_routine(message.get(JSON_NAME, ""))
         send_ack(ssl_socket, message, succeeded, queued if succeeded else 0)
         return LANE_ACT_LEGS if used_legs else LANE_ACT_ARMS
     if message_type == RELAY_TYPE_STOP:
-        motion.clear_both()
-        motion.release_all_mapped_ports()
+        motion.stop()
         send_ack(ssl_socket, message, True, 0)
         return LANE_STOP
     return None
@@ -311,8 +315,8 @@ def serve(ssl_socket, raw_socket):
     poll = select.poll()
     poll.register(raw_socket, select.POLLIN)
     send_text(ssl_socket, json.dumps({
-        RELAY_TYPE_FIELD: RELAY_TYPE_HELLO,
-        RELAY_DEVICE_ID_FIELD: DEVICE_ID,
+        JSON_TYPE: RELAY_TYPE_HELLO,
+        JSON_ID: DEVICE_ID,
     }))
     print("hello sent; walk + gesture lanes ready (dead-man %dms)" % DEAD_MAN_MILLISECONDS)
     if hardware_watchdog is None:
